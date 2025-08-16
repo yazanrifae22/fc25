@@ -453,7 +453,15 @@
           } catch (e) {
             console.warn('[Automation] Fast-path action error:', e);
           }
-          // finish this run, then continue to next iteration
+          // If no items remain, redo this iteration so we open a new pack immediately
+          try {
+            const latest = (lastPurchasedItems && lastPurchasedItems.data) || null;
+            const s = computeItemsStats(latest);
+            if (s.available && s.totalItems === 0) {
+              console.log('[Automation] No players/items remain after actions; redoing iteration to open a new pack.');
+              i--; // do not consume a run; redo logic on the next loop
+            }
+          } catch {}
           await sleep(600);
           continue;
         }
@@ -537,7 +545,15 @@
           } catch (e) {
             console.warn('[Automation] Post-send action error:', e);
           }
-          // finish this run, then continue to next iteration
+          // If no items remain, redo this iteration so we open a new pack immediately
+          try {
+            const latest = (lastPurchasedItems && lastPurchasedItems.data) || null;
+            const s = computeItemsStats(latest);
+            if (s.available && s.totalItems === 0) {
+              console.log('[Automation] No players/items remain after actions; redoing iteration to open a new pack.');
+              i--; // do not consume a run; redo logic on the next loop
+            }
+          } catch {}
           await sleep(600);
           continue;
         }
@@ -609,7 +625,15 @@
           } else {
             console.warn('[Automation] Send All not clicked and not all duplicates; will wait for next run.');
           }
-          // finish this run, then continue to next iteration
+          // If no items remain, redo this iteration so we open a new pack immediately
+          try {
+            const latest = (lastPurchasedItems && lastPurchasedItems.data) || null;
+            const s = computeItemsStats(latest);
+            if (s.available && s.totalItems === 0) {
+              console.log('[Automation] No players/items remain after actions; redoing iteration to open a new pack.');
+              i--; // do not consume a run; redo logic on the next loop
+            }
+          } catch {}
           await sleep(600);
           continue;
         }

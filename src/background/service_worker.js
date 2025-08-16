@@ -3,6 +3,8 @@
 // Background service worker (stateless, MV3)
 // Minimal message bus scaffold for future automation features.
 
+let __x10AltToggle = false; // alternates X10_84 between x10 and TOTW
+
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === "install") {
     console.log("EA FC Automation: Installed");
@@ -79,6 +81,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               try { el.dispatchEvent(new MouseEvent('mouseup', base)); } catch {}
               try { el.dispatchEvent(new MouseEvent('click', base)); } catch {}
             };
+            const scrollToTop = async () => {
+              try { window.scrollTo({ top: 0, behavior: 'auto' }); } catch {}
+              try { const se = document.scrollingElement; if (se) se.scrollTop = 0; } catch {}
+              try { if (document.documentElement) document.documentElement.scrollTop = 0; } catch {}
+              try { if (document.body) document.body.scrollTop = 0; } catch {}
+              await sleep(50);
+            };
+            await scrollToTop();
             const start = Date.now();
             while (Date.now() - start < 15000) {
               const el = document.querySelector(sel);
@@ -213,6 +223,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }
               return null;
             };
+            const scrollToTop = async () => {
+              try { window.scrollTo({ top: 0, behavior: 'auto' }); } catch {}
+              try { const se = document.scrollingElement; if (se) se.scrollTop = 0; } catch {}
+              try { if (document.documentElement) document.documentElement.scrollTop = 0; } catch {}
+              try { if (document.body) document.body.scrollTop = 0; } catch {}
+              await sleep(50);
+            };
+            await scrollToTop();
             // 1) Open ellipsis menu
             let ell = null;
             const t0 = Date.now();
@@ -554,6 +572,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               if (aria && getLabel(aria).includes(needle) && isVisible(aria)) return aria;
               return null;
             };
+            const scrollToTop = async () => {
+              try { window.scrollTo({ top: 0, behavior: 'auto' }); } catch {}
+              try { const se = document.scrollingElement; if (se) se.scrollTop = 0; } catch {}
+              try { if (document.documentElement) document.documentElement.scrollTop = 0; } catch {}
+              try { if (document.body) document.body.scrollTop = 0; } catch {}
+              await sleep(50);
+            };
+            await scrollToTop();
             const start = Date.now();
             while (Date.now() - start < 25000) { // up to 25s
               const el = find();
@@ -581,11 +607,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
       const mode = message.mode; // 'OVR89' or 'X10_84'
+      const pickTotw = (mode === 'X10_84') ? __x10AltToggle : false;
+      if (mode === 'X10_84') { __x10AltToggle = !__x10AltToggle; }
       chrome.scripting
         .executeScript({
           target: { tabId, allFrames: true },
           world: "MAIN",
-          func: async (mode) => {
+          func: async (mode, pickTotw) => {
             const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
             const isVisible = (el) => {
               const cs = getComputedStyle(el);
@@ -650,7 +678,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }
               return null;
             };
-
+            const scrollToTop = async () => {
+              try { window.scrollTo({ top: 0, behavior: 'auto' }); } catch {}
+              try { const se = document.scrollingElement; if (se) se.scrollTop = 0; } catch {}
+              try { if (document.documentElement) document.documentElement.scrollTop = 0; } catch {}
+              try { if (document.body) document.body.scrollTop = 0; } catch {}
+              await sleep(50);
+            };
+            await scrollToTop();
             // 0) Open recycle popup by clicking #auto-sbc-recycle
             let opened = false;
             const t0 = Date.now();
@@ -674,10 +709,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const selStart = Date.now();
             while (!targetBtn && Date.now() - selStart < 6000) {
               const buttons = Array.from(container.querySelectorAll('button'));
+              let candX10 = null;
+              let candTotw = null;
               for (const b of buttons) {
                 const t = textOf(b);
                 if (mode === 'OVR89' && t.includes('89 ovr squadshifter')) { targetBtn = b; break; }
-                if (mode === 'X10_84' && (t.includes('84+ x10 upgrade') || t.includes('84 + x10 upgrade'))) { targetBtn = b; break; }
+                if (mode === 'X10_84') {
+                  const isX10 = t.includes('84+ x10 upgrade') || t.includes('84 + x10 upgrade') || t.includes('84x10 upgrade');
+                  const isTotw = t.includes('84+ totw upgrade') || t.includes('84 + totw upgrade') || t.includes('totw upgrade');
+                  if (isX10 && !candX10) candX10 = b;
+                  if (isTotw && !candTotw) candTotw = b;
+                }
+              }
+              if (!targetBtn && mode === 'X10_84') {
+                targetBtn = pickTotw ? (candTotw || candX10) : (candX10 || candTotw);
               }
               if (!targetBtn) await sleep(200);
             }
@@ -756,7 +801,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
             return { opened, selected, submitClicked, dismissed };
           },
-          args: [mode],
+          args: [mode, pickTotw],
         })
         .then((results) => {
           const agg = { opened: false, selected: false, submitClicked: false, dismissed: false };
