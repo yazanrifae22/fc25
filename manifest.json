@@ -16,8 +16,7 @@
         "https://www.ea.com/ea-sports-fc/ultimate-team/web-app/*"
       ],
       "js": ["src/content-scripts/automation-button.js"],
-      "run_at": "document_idle",
-      "all_frames": true
+      "run_at": "document_idle"
     }
   ],
   "permissions": ["scripting"],

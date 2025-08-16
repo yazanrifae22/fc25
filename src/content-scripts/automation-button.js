@@ -4,6 +4,8 @@
 // Keeps page pollution minimal and CSS isolated.
 
 (function init() {
+  // Only inject into the top frame to avoid duplicate overlays in iframes
+  try { if (window.top !== window) return; } catch {}
   const ROOT_ID = "ext-automation-root";
   const EXISTING = document.getElementById(ROOT_ID);
   if (EXISTING) return; // avoid double-injection
@@ -14,7 +16,7 @@
   container.style.all = "initial";
   container.style.position = "fixed";
   container.style.top = "12px";
-  container.style.left = "12px";
+  container.style.right = "12px"; // anchor to top-right to avoid off-screen overflow
   container.style.transform = "none";
   container.style.zIndex = "2147483647"; // on top
   // Allow interactions; Shadow DOM keeps styles isolated.
@@ -96,13 +98,12 @@
   menu.setAttribute("role", "menu");
   menu.hidden = true;
   menu.innerHTML = `
-    <div id="ext-run-automation" class="ext-item action" role="menuitem">
-      ▶ Run automation...
-      <span class="ext-badge">prompt count</span>
-    </div>
-    <div class="ext-item" role="menuitem" aria-disabled="true">
-      Automation (more steps)
-      <span class="ext-badge">TODO</span>
+    <div class="ext-item" role="group" aria-label="Automation controls">
+      <span style="color:#F9FAFB">Runs</span>
+      <input id="ext-run-count" type="number" min="1" max="50" value="5" style="margin-left:8px;width:56px;background:#0B1220;color:#F9FAFB;border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:6px 8px;" />
+      <button id="ext-start" class="ext-button" style="margin-left:8px;padding:8px 10px;">Start</button>
+      <button id="ext-stop" class="ext-button" style="margin-left:6px;padding:8px 10px;background:#374151;">Stop</button>
+      <span class="ext-badge" aria-live="polite" style="margin-left:8px;">ready</span>
     </div>
   `;
 
@@ -123,17 +124,28 @@
   // Click outside to close
   document.addEventListener(
     "click",
-    () => closeMenu(),
+    (ev) => {
+      try {
+        // Only close if the click is truly outside our container/shadow root
+        const path = (ev.composedPath && ev.composedPath()) || [];
+        const inside = path.includes(container) || path.includes(shadow);
+        if (inside) return;
+        const t = ev.target;
+        if (t && (t === container || (container.contains && container.contains(t)))) return;
+      } catch {}
+      closeMenu();
+    },
     { capture: true }
   );
 
   // --- Automation logic ---
   let isRunning = false;
+  let cancelRequested = false;
 
   async function injectNetworkHook() {
     // Ask background to inject in MAIN world using chrome.scripting.executeScript
     try {
-      const res = await chrome.runtime.sendMessage({ type: 'HOOK_PURCHASED_ITEMS' });
+      const res = await withTimeout(chrome.runtime.sendMessage({ type: 'HOOK_PURCHASED_ITEMS' }), 'HOOK_PURCHASED_ITEMS', 10000);
       if (!res || !res.ok) {
         console.warn('[Automation] Hook injection failed:', res && res.error);
       }
@@ -183,6 +195,19 @@
     }, true);
   }
 
+  // Bridge messages from subframes: the hook also postMessages the payload to the top window.
+  // We listen here and re-dispatch the same CustomEvent in the top frame so existing listeners work.
+  function setupPurchasedItemsBridge() {
+    window.addEventListener('message', (ev) => {
+      try {
+        const msg = ev && ev.data;
+        if (!msg || msg.__ea !== true || msg.type !== 'EA_AUTOMATION_PURCHASED_ITEMS') return;
+        const payload = msg.payload;
+        window.dispatchEvent(new CustomEvent('EA_AUTOMATION_PURCHASED_ITEMS', { detail: payload }));
+      } catch {}
+    }, true);
+  }
+
   function oncePurchasedItems(timeoutMs = 10000) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -207,6 +232,28 @@
   }
 
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  async function sleepLog(ms, label = 'sleep') {
+    const t0 = Date.now();
+    try { console.log(`[Automation][wait] ${label} start ms=${ms} at ${t0}`); } catch {}
+    await sleep(ms);
+    try { console.log(`[Automation][wait] ${label} end elapsed=${Date.now() - t0}ms`); } catch {}
+  }
+
+  // Wrap async operations with a timeout and structured logs to avoid indefinite hangs
+  async function withTimeout(promise, label = 'op', timeoutMs = 20000) {
+    const start = Date.now();
+    try {
+      const res = await Promise.race([
+        promise,
+        (async () => { await sleep(timeoutMs); throw new Error('timeout'); })()
+      ]);
+      try { console.log(`[Automation] ${label} completed in`, Date.now() - start, 'ms:', res); } catch {}
+      return res;
+    } catch (e) {
+      try { console.warn(`[Automation] ${label} timeout/error after`, Date.now() - start, 'ms:', e); } catch {}
+      return { ok: false, error: String((e && e.message) || e), timeout: true };
+    }
+  }
 
   // Helpers to compute rating histogram from response data
   function extractItemsArray(data) {
@@ -401,39 +448,55 @@
     return true;
   }
 
-  async function runAutomation() {
+  async function runAutomation(runsParam) {
     if (isRunning) return;
     isRunning = true;
+    setRunningUI(true);
     try {
       // Close menu so it doesn't overlay clicks
       closeMenu();
-      injectNetworkHook();
-
-      const input = prompt('Enter number of runs', '5');
-      if (!input) return;
-      const runs = Math.max(1, Math.min(50, parseInt(String(input).trim(), 10) || 0));
-      if (!runs) return;
+      await injectNetworkHook();
+      // small stabilization to ensure fetch/XHR are patched
+      await sleep(120);
+      const runs = Math.max(1, Math.min(50, parseInt(String(runsParam ?? 5), 10) || 5));
 
       for (let i = 0; i < runs; i++) {
+        console.log(`[Automation] ==== Run ${i + 1}/${runs} start ====`);
+        if (cancelRequested) { console.warn('[Automation] Cancel requested; stopping.'); break; }
         const iterStart = Date.now();
         const iterTimeoutMs = 45000; // watchdog for a single iteration
         const deadlineExceeded = () => (Date.now() - iterStart) > iterTimeoutMs;
-        // 1) Click the Open button
-        const openBtn = await waitForButton([
-          'button.currency.call-to-action',
-          'button.call-to-action',
-          'button'
-        ], 'Open', 8000);
-        if (!openBtn) {
-          console.warn('[Automation] Open button not found. Stopping.');
-          break;
+        // Prepare listener BEFORE clicking to avoid race with fast network
+        const purchasedWait = oncePurchasedItems(12000);
+        // 1) Click the Open button (prefer background MAIN-world click)
+        let openClicked = false;
+        try {
+          const res = await withTimeout(chrome.runtime.sendMessage({ type: 'CLICK_OPEN' }), 'CLICK_OPEN', 20000);
+          openClicked = !!(res && res.ok && res.clicked);
+        } catch (e) {
+          console.warn('[Automation] Background CLICK_OPEN error:', e);
         }
-        await clickElement(openBtn);
+        if (!openClicked) {
+          // Fallback: try locally
+          const openBtn = await waitForButton([
+            'button.currency.call-to-action',
+            'button.call-to-action',
+            'button'
+          ], 'Open', 8000);
+          if (!openBtn) {
+            console.warn('[Automation] Open button not found. Stopping.');
+            break;
+          }
+          await clickElement(openBtn);
+        }
         if (deadlineExceeded()) {
           console.warn('[Automation] Iteration watchdog: deadline exceeded after clicking Open');
           await sleep(600);
           continue;
         }
+
+        // Stabilize after opening the pack before proceeding
+        await sleepLog(3000, 'post-open-stabilize');
 
         // Handle Unassigned dialog immediately after Open
         const diverted = await handleUnassignedDialogIfPresent(6000);
@@ -461,7 +524,7 @@
         // 2) Wait for purchased/items after opening, then compute fast path
         let latestEvent = null;
         try {
-          latestEvent = await oncePurchasedItems(12000);
+          latestEvent = await purchasedWait;
         } catch (e) {
           console.warn('[Automation] No purchased/items event after Open within 12s:', e);
         }
@@ -483,7 +546,7 @@
             if (mode === 'OVR89') {
               const res1 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'OVR89' });
               console.log('[Automation] RECYCLE_WORKFLOW OVR89 result:', res1);
-              await sleep(1000);
+              await sleepLog(3000, 'after OVR89 recycle');
               // Refresh histogram after OVR89 to decide next step
               let refreshed = null;
               try { refreshed = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after OVR89 within 8s:', e); }
@@ -495,7 +558,7 @@
                 if (!hasX10CriteriaFromHistogram(xHist)) break;
                 const res2 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
                 console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res2);
-                await sleep(1000);
+                await sleepLog(3000, `after X10_84 pass ${pass + 1}`);
                 let ref = null;
                 try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
                 xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
@@ -510,7 +573,7 @@
                 if (!hasX10CriteriaFromHistogram(xHist)) break;
                 const res = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
                 console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res);
-                await sleep(1000);
+                await sleepLog(3000, `after X10_84 pass ${pass + 1}`);
                 let ref = null;
                 try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
                 xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
@@ -541,7 +604,7 @@
         // 3) Click "Send All To Club" first
         let clicked = false;
         try {
-          const res = await chrome.runtime.sendMessage({ type: 'CLICK_SEND_ALL' });
+          const res = await withTimeout(chrome.runtime.sendMessage({ type: 'CLICK_SEND_ALL' }), 'CLICK_SEND_ALL', 15000);
           clicked = !!(res && res.ok && res.clicked);
         } catch (e) {
           console.warn('[Automation] Background click attempt failed:', e);
@@ -560,38 +623,40 @@
           }
         }
 
-        // Enforce order: after pressing Send All, wait 1s, then take action (stabilization)
+        // Enforce order: after pressing Send All, wait 3s, then take action (stabilization)
         if (clicked) {
           if (deadlineExceeded()) {
             console.warn('[Automation] Iteration watchdog: deadline exceeded before post-send actions');
             await sleep(600);
             continue;
           }
-          await sleep(1000);
-          const hist = lastRatingHistogram || {};
-          const mode = decideRecycleModeFromHistogram(hist);
-          console.log('[Automation] Decision after Send All (using latest histogram):', { mode, hist });
+          await sleepLog(3000, 'post-send-stabilize');
           try {
+            const hist = lastRatingHistogram || {};
+            const mode = decideRecycleModeFromHistogram(hist);
+            console.log('[Automation] Post-send decision:', { mode, hist });
+
             if (mode === 'OVR89') {
               const res1 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'OVR89' });
               console.log('[Automation] RECYCLE_WORKFLOW OVR89 result:', res1);
-              await sleep(1000);
+              await sleepLog(3000, 'after OVR89 recycle');
               // Refresh histogram after OVR89 to decide next step
               let refreshed = null;
               try { refreshed = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after OVR89 within 8s:', e); }
               const hist2 = (refreshed && computeRatingHistogram(refreshed.data)) || lastRatingHistogram || hist;
               console.log('[Automation] Histogram after OVR89:', hist2);
-              // Run X10_84 repeatedly while criteria remain (safety cap 3), then quick sell
-              let xHist = hist2;
-              for (let pass = 0; pass < 3; pass++) {
-                if (!hasX10CriteriaFromHistogram(xHist)) break;
-                const res2 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
-                console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res2);
-                await sleep(1000);
-                let ref = null;
-                try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
-                xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
-                console.log('[Automation] Histogram after X10_84 pass:', xHist);
+              if (hasX10CriteriaFromHistogram(hist2)) {
+                let xHist = hist2;
+                for (let pass = 0; pass < 3; pass++) {
+                  if (!hasX10CriteriaFromHistogram(xHist)) break;
+                  const res2 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
+                  console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res2);
+                  await sleepLog(3000, `after X10_84 pass ${pass + 1}`);
+                  let ref = null;
+                  try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
+                  xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
+                  console.log('[Automation] Histogram after X10_84 pass:', xHist);
+                }
               }
               const q = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
               console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
@@ -602,7 +667,7 @@
                 if (!hasX10CriteriaFromHistogram(xHist)) break;
                 const res = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
                 console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res);
-                await sleep(1000);
+                await sleepLog(3000, `after X10_84 pass ${pass + 1}`);
                 let ref = null;
                 try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
                 xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
@@ -648,7 +713,7 @@
               if (mode === 'OVR89') {
                 const res1 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'OVR89' });
                 console.log('[Automation] RECYCLE_WORKFLOW OVR89 result:', res1);
-                await sleep(1000);
+                await sleepLog(3000, 'after OVR89 recycle');
                 // Refresh histogram after OVR89 to decide next step
                 let refreshed = null;
                 try { refreshed = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after OVR89 within 8s:', e); }
@@ -660,7 +725,7 @@
                     if (!hasX10CriteriaFromHistogram(xHist)) break;
                     const res2 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
                     console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res2);
-                    await sleep(1000);
+                    await sleepLog(3000, `after X10_84 pass ${pass + 1}`);
                     let ref = null;
                     try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
                     xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
@@ -679,7 +744,7 @@
                   if (!hasX10CriteriaFromHistogram(xHist)) break;
                   const res = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
                   console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res);
-                  await sleep(1000);
+                  await sleepLog(3000, `after X10_84 pass ${pass + 1}`);
                   let ref = null;
                   try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
                   xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
@@ -712,21 +777,41 @@
 
         // Small delay between runs
         await sleep(600);
+        console.log(`[Automation] ==== Run ${i + 1}/${runs} end ====`);
       }
     } finally {
       isRunning = false;
+      setRunningUI(false);
       closeMenu();
     }
   }
 
-  // Bind menu item
-  menu.addEventListener('click', (e) => {
-    const target = e.target;
-    const item = target && target.closest('#ext-run-automation');
-    if (item) {
-      e.stopPropagation();
-      runAutomation();
-    }
+  // Bind controls: Start/Stop with live state
+  const runInput = menu.querySelector('#ext-run-count');
+  const startBtn = menu.querySelector('#ext-start');
+  const stopBtn = menu.querySelector('#ext-stop');
+  const badge = menu.querySelector('.ext-badge');
+
+  function setRunningUI(running) {
+    try {
+      isRunning = !!running;
+      if (startBtn) startBtn.disabled = running;
+      if (stopBtn) stopBtn.disabled = !running;
+      if (badge) badge.textContent = running ? 'running…' : 'ready';
+    } catch {}
+  }
+  setRunningUI(false);
+
+  if (startBtn) startBtn.addEventListener('click', () => {
+    if (isRunning) return;
+    cancelRequested = false;
+    const val = (runInput && runInput.value) ? parseInt(runInput.value, 10) : 5;
+    const runs = Math.max(1, Math.min(50, Number.isFinite(val) ? val : 5));
+    runAutomation(runs).catch((e) => { try { console.warn('[Automation] runAutomation error:', e); } catch {} });
+  });
+  if (stopBtn) stopBtn.addEventListener('click', () => {
+    cancelRequested = true;
+    setRunningUI(true); // still running until loop checks cancel
   });
 
   wrap.appendChild(button);
@@ -737,6 +822,7 @@
 
   // Always enable logging and hook injection so latest responses are printed on every GET/POST
   try { setupPurchasedItemsLogger(); } catch {}
+  try { setupPurchasedItemsBridge(); } catch {}
   try { injectNetworkHook(); } catch {}
 
 })();
