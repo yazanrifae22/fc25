@@ -230,44 +230,125 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               try { if (document.body) document.body.scrollTop = 0; } catch {}
               await sleep(50);
             };
+            // Pre-step: handle "Unassigned Items Remain" dialog if present
+            let takeMeThereClicked = false;
+            const matchTakeMeThere = (txt, aria) => {
+              const t = (txt || '').trim().toLowerCase();
+              const a = (aria || '').trim().toLowerCase();
+              return t === 'take me there' || a === 'take me there';
+            };
+            const findUnassignedDialogTakeMeThere = () => {
+              const roots = Array.from(document.querySelectorAll('.ea-dialog-view.ea-dialog-view-type--message, .ea-dialog, .ut-dialog, [role="dialog"]'));
+              for (const root of roots) {
+                const titleEl = root.querySelector('.ea-dialog-view--title, h1, h2');
+                const bodyEl = root.querySelector('.ea-dialog-view--msg, .ea-dialog-view--body, p');
+                const titleText = (titleEl && (titleEl.textContent || '')) || '';
+                const bodyText = (bodyEl && (bodyEl.textContent || '')) || '';
+                const combined = `${titleText} ${bodyText}`.toLowerCase();
+                if (combined.includes('unassigned items remain') || combined.includes('unassigned pile')) {
+                  // find the Take Me There button
+                  const btns = Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"]'));
+                  for (const b of btns) {
+                    const txt = (b.textContent || '').trim().toLowerCase();
+                    const aria = (b.getAttribute && (b.getAttribute('aria-label') || '') || '').toLowerCase();
+                    if (matchTakeMeThere(txt, aria) && isVisible(b) && isEnabled(b)) return b;
+                  }
+                  // also scan spans
+                  const spans = Array.from(root.querySelectorAll('span, div, a'));
+                  for (const sp of spans) {
+                    const t = (sp.textContent || '').trim().toLowerCase();
+                    const a = (sp.getAttribute && (sp.getAttribute('aria-label') || '') || '').toLowerCase();
+                    if (matchTakeMeThere(t, a)) {
+                      const b = sp.closest('button, [role="button"], [role="menuitem"]') || sp;
+                      if (b && isVisible(b) && isEnabled(b)) return b;
+                    }
+                  }
+                }
+              }
+              return null;
+            };
+            // Try detect and click "Take Me There"
+            {
+              const tD = Date.now();
+              let tmtBtn = null;
+              while (!tmtBtn && Date.now() - tD < 4000) {
+                tmtBtn = findUnassignedDialogTakeMeThere();
+                if (!tmtBtn) await sleep(200);
+              }
+              if (tmtBtn) {
+                takeMeThereClicked = await clickEl(tmtBtn.closest('button') || tmtBtn);
+                try { console.log('[Automation][Unassigned] Take Me There clicked:', takeMeThereClicked); } catch {}
+                // Wait for dialog to dismiss
+                const tW = Date.now();
+                const dialogGone = () => !document.querySelector('.ea-dialog-view.ea-dialog-view-type--message, .ea-dialog, .ut-dialog, [role="dialog"]');
+                while (!dialogGone() && Date.now() - tW < 8000) {
+                  await sleep(200);
+                }
+                await sleep(300); // small settle
+              }
+            }
             await scrollToTop();
-            // 1) Open ellipsis menu
+            // Force ellipsis path: click the 3-dots then choose "Quick Sell untradeable items for 0" from popup
+            let ellipsisClicked = false;
+            let quickSellClicked = false;
+
+            // 1) Open ellipsis menu (strict selector first)
             let ell = null;
             const t0 = Date.now();
             while (!ell && Date.now() - t0 < 8000) {
-              ell = document.querySelector('button.ut-image-button-control.ellipsis-btn');
+              ell = document.querySelector('button.ut-image-button-control.ellipsis-btn')
+                 || document.querySelector('button[aria-label*="more" i], button[aria-label*="options" i], button[title*="more" i], button[title*="options" i]');
               if (ell && isVisible(ell) && isEnabled(ell)) break;
               ell = null;
               await sleep(250);
             }
-            let ellipsisClicked = false;
-            if (ell) ellipsisClicked = await clickEl(ell);
-            try { console.log('[Automation][QS] Ellipsis clicked:', ellipsisClicked); } catch {}
-            await sleep(1000); // allow menu render (stabilization)
+            if (ell) {
+              ellipsisClicked = await clickEl(ell);
+              try { console.log('[Automation][QS] Ellipsis clicked:', ellipsisClicked); } catch {}
+              await sleep(600); // allow menu render (stabilization)
+            } else {
+              try { console.warn('[Automation][QS] Ellipsis button not found'); } catch {}
+            }
 
-            // 2) Click "Quick Sell untradeable items for 0"
+            // 2) From popup, click: "Quick Sell untradeable items for 0"
+            const isInlineKeyQuickSell = (n) => !!(n && (n.closest && n.closest('.key-quick-sell-btn')));
+            const matchPopupQuickSell = (txt, node, aria) => {
+              const label = `${txt} ${aria}`;
+              const hasQuickSell = label.includes('quick sell');
+              const hasUntrade = label.includes('untradeable') || label.includes('untradable') || label.includes('untradeble');
+              const hasZero = /\b0\b/.test(label) || /for\s*0/.test(label) || /0\s*coins?/.test(label);
+              return hasQuickSell && hasUntrade && hasZero;
+            };
             let qsBtn = null;
             const t1 = Date.now();
             while (!qsBtn && Date.now() - t1 < 8000) {
               qsBtn = findByText((txt, node, aria) => {
-                const label = `${txt} ${aria}`;
-                const hasQuickSell = label.includes('quick sell');
-                const hasUntrade = label.includes('untradeable') || label.includes('untradable') || label.includes('untradeble');
-                const hasZero = /\b0\b/.test(label) || /for\s*0/.test(label) || /0\s*coins?/.test(label);
-                return hasQuickSell && hasUntrade && hasZero;
+                if (isInlineKeyQuickSell(node)) return false; // avoid inline quick sell button
+                return matchPopupQuickSell(txt, node, aria);
               });
-              if (qsBtn) {
-                if (!isVisible(qsBtn) || !isEnabled(qsBtn)) qsBtn = null;
-              }
+              if (qsBtn && (!isVisible(qsBtn) || !isEnabled(qsBtn))) qsBtn = null;
               if (!qsBtn) await sleep(250);
             }
-            if (!qsBtn) { try { console.warn('[Automation][QS] Quick Sell button not found within 8s'); } catch {} }
-            let quickSellClicked = false;
+            if (!qsBtn && ellipsisClicked) {
+              // Retry once by re-clicking ellipsis in case menu closed
+              await clickEl(ell);
+              await sleep(500);
+              const t1b = Date.now();
+              while (!qsBtn && Date.now() - t1b < 4000) {
+                qsBtn = findByText((txt, node, aria) => {
+                  if (isInlineKeyQuickSell(node)) return false;
+                  return matchPopupQuickSell(txt, node, aria);
+                });
+                if (qsBtn && (!isVisible(qsBtn) || !isEnabled(qsBtn))) qsBtn = null;
+                if (!qsBtn) await sleep(200);
+              }
+            }
+            if (!qsBtn) { try { console.warn('[Automation][QS] Popup Quick Sell option not found'); } catch {} }
             if (qsBtn) {
               quickSellClicked = await clickEl(qsBtn.closest('button') || qsBtn);
-              try { console.log('[Automation][QS] Quick Sell clicked:', quickSellClicked); } catch {}
+              try { console.log('[Automation][QS] Popup Quick Sell clicked:', quickSellClicked); } catch {}
             }
-            await sleep(1000); // allow confirm dialog to appear (stabilization)
+            await sleep(600); // allow confirm dialog to appear
 
             // 3) Confirm OK
             const matchOk = (txt, aria) => {
@@ -357,7 +438,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               await sleep(200);
             }
             try { console.log('[Automation][QS] Dialog dismissed:', dismissed, 'elapsedMs=', Date.now() - t3); } catch {}
-            return finish({ ellipsisClicked, quickSellClicked, confirmClicked, dismissed });
+            return finish({ takeMeThereClicked, ellipsisClicked, quickSellClicked, confirmClicked, dismissed });
             } catch (e) {
               try { console.error('[Automation] QUICK_SELL_UNTRADEABLES error:', e); } catch {}
               return finish({ error: String(e && e.message || e) });
@@ -365,10 +446,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           },
         })
         .then((results) => {
-          const agg = { ellipsisClicked: false, quickSellClicked: false, confirmClicked: false, dismissed: false };
+          const agg = { takeMeThereClicked: false, ellipsisClicked: false, quickSellClicked: false, confirmClicked: false, dismissed: false };
           if (Array.isArray(results)) {
             for (const r of results) {
               if (r && r.result) {
+                agg.takeMeThereClicked = agg.takeMeThereClicked || !!r.result.takeMeThereClicked;
                 agg.ellipsisClicked = agg.ellipsisClicked || !!r.result.ellipsisClicked;
                 agg.quickSellClicked = agg.quickSellClicked || !!r.result.quickSellClicked;
                 agg.confirmClicked = agg.confirmClicked || !!r.result.confirmClicked;
@@ -701,7 +783,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
             const container = await waitForContainer();
             if (!container) {
-              return { opened, selected: false, submitClicked: false, dismissed: false, error: 'container_not_found' };
+              // Fallback: try to select and submit directly by global text search
+              try { console.debug('[Automation][RECYCLE] Container not found; using global fallback'); } catch {}
+              let targetBtn = null;
+              const selStart2 = Date.now();
+              while (!targetBtn && Date.now() - selStart2 < 6000) {
+                targetBtn = findByText((txt, node, aria) => {
+                  if (mode === 'OVR89') {
+                    return (txt.includes('89') && (txt.includes('ovr') || txt.includes('squadshifter') || txt.includes('squad shifter')))
+                      || (aria.includes('89') && (aria.includes('ovr') || aria.includes('squad')));
+                  } else {
+                    const hasX10 = txt.includes('84+ x10') || txt.includes('84 + x10') || txt.includes('84x10') || aria.includes('x10');
+                    const hasTotw = txt.includes('totw upgrade') || aria.includes('totw');
+                    return pickTotw ? (hasTotw || hasX10) : (hasX10 || hasTotw);
+                  }
+                });
+                if (targetBtn && (!isVisible(targetBtn) || !isEnabled(targetBtn))) targetBtn = null;
+                if (!targetBtn) await sleep(200);
+              }
+              let selected = false;
+              if (targetBtn) selected = await clickEl(targetBtn.closest('button') || targetBtn);
+              await sleep(800);
+
+              // Try to find a submit/confirm button globally
+              let submit = null;
+              const tSub2 = Date.now();
+              while (!submit && Date.now() - tSub2 < 6000) {
+                submit = findByText((txt, node, aria) => {
+                  const label = `${txt} ${aria}`;
+                  return label.includes('submit') || label.includes('confirm') || label.includes('proceed') || label.includes('continue') || label === 'ok' || label.includes('ok ');
+                });
+                if (submit && (!isVisible(submit) || !isEnabled(submit))) submit = null;
+                if (!submit) await sleep(200);
+              }
+              let submitClicked = false;
+              if (submit) submitClicked = await clickEl(submit.closest('button') || submit);
+              await sleep(1000);
+
+              // Consider dismissed if no obvious dialog elements present
+              const dismissed = !document.querySelector('[role="dialog"], .dialog, .utt-modal, .ut-dialog');
+              return { opened, selected, submitClicked, dismissed, fallback: true };
             }
 
             // 1) Select SBC option based on mode

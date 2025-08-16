@@ -291,6 +291,55 @@
     return true;
   }
 
+  // Detect and handle the "Unassigned Items Remain" dialog
+  async function handleUnassignedDialogIfPresent(timeoutMs = 6000) {
+    const start = Date.now();
+    const findDialog = () => {
+      const roots = document.querySelectorAll('.ea-dialog-view.ea-dialog-view-type--message, .ea-dialog, .ut-dialog, [role="dialog"]');
+      for (const root of roots) {
+        const titleEl = root.querySelector('.ea-dialog-view--title, h1, h2');
+        const bodyEl = root.querySelector('.ea-dialog-view--msg, .ea-dialog-view--body, p');
+        const titleText = (titleEl && (titleEl.textContent || '')) || '';
+        const bodyText = (bodyEl && (bodyEl.textContent || '')) || '';
+        const combined = `${titleText} ${bodyText}`.toLowerCase();
+        if (combined.includes('unassigned items remain') || combined.includes('unassigned pile')) {
+          // Find Take Me There
+          const btns = root.querySelectorAll('button, [role="button"], [role="menuitem"]');
+          for (const b of btns) {
+            const t = (b.textContent || '').trim().toLowerCase();
+            const a = (b.getAttribute && (b.getAttribute('aria-label') || '') || '').toLowerCase();
+            if (t === 'take me there' || a === 'take me there') return b;
+          }
+          const spans = root.querySelectorAll('span, div, a');
+          for (const sp of spans) {
+            const t = (sp.textContent || '').trim().toLowerCase();
+            const a = (sp.getAttribute && (sp.getAttribute('aria-label') || '') || '').toLowerCase();
+            if (t === 'take me there' || a === 'take me there') {
+              return sp.closest('button, [role="button"], [role="menuitem"]') || sp;
+            }
+          }
+        }
+      }
+      return null;
+    };
+    let btn = null;
+    while (!btn && Date.now() - start < timeoutMs) {
+      btn = findDialog();
+      if (!btn) await sleep(200);
+    }
+    if (!btn) return false;
+    await clickElement(btn);
+    console.log('[Automation] Unassigned dialog: Take Me There clicked');
+    // Wait for the dialog to be gone
+    const t2 = Date.now();
+    const dialogGone = () => !document.querySelector('.ea-dialog-view.ea-dialog-view-type--message, .ea-dialog, .ut-dialog, [role="dialog"]');
+    while (!dialogGone() && Date.now() - t2 < 8000) {
+      await sleep(200);
+    }
+    await sleep(300);
+    return true;
+  }
+
   async function waitForButton(selectors, textIncludes, timeoutMs = 8000) {
     const start = Date.now();
     const needle = textIncludes ? String(textIncludes).toLowerCase() : "";
@@ -382,6 +431,29 @@
         await clickElement(openBtn);
         if (deadlineExceeded()) {
           console.warn('[Automation] Iteration watchdog: deadline exceeded after clicking Open');
+          await sleep(600);
+          continue;
+        }
+
+        // Handle Unassigned dialog immediately after Open
+        const diverted = await handleUnassignedDialogIfPresent(6000);
+        if (diverted) {
+          console.log('[Automation] Unassigned dialog handled; jumping to Quick Sell flow');
+          try {
+            const q = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
+            console.log('[Automation] QUICK_SELL_UNTRADEABLES result (after Unassigned):', q);
+          } catch (e) {
+            console.warn('[Automation] QUICK_SELL_UNTRADEABLES error (after Unassigned):', e);
+          }
+          // Redo iteration immediately if no items remain
+          try {
+            const latest = (lastPurchasedItems && lastPurchasedItems.data) || null;
+            const s = computeItemsStats(latest);
+            if (s.available && s.totalItems === 0) {
+              console.log('[Automation] No players/items remain after Unassigned quick sell; redoing iteration.');
+              i--;
+            }
+          } catch {}
           await sleep(600);
           continue;
         }
