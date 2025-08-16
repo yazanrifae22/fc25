@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "EA FC Web App Automation (Starter)",
+  "description": "Starter MV3 extension that injects an overflow Automation button on the EA FC Web App. Functionality to be added.",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "Automation",
+    "default_popup": "src/ui/popup.html"
+  },
+  "background": {
+    "service_worker": "src/background/service_worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.ea.com/ea-sports-fc/ultimate-team/web-app/*"
+      ],
+      "js": ["src/content-scripts/automation-button.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "permissions": ["scripting"],
+  "host_permissions": [
+    "https://www.ea.com/ea-sports-fc/ultimate-team/web-app/*"
+  ]
+}
