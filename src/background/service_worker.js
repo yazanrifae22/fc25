@@ -116,9 +116,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message.type === "QUICK_SELL_UNTRADEABLES") {
-      const tabId = sender?.tab?.id;
+      const tabId = message.tabId || sender?.tab?.id;
       if (!tabId) {
-        sendResponse({ ok: false, error: "No tabId for click injection" });
+        sendResponse({ ok: false, error: "No tabId for quick sell injection" });
         return;
       }
       chrome.scripting
@@ -911,7 +911,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               await sleep(1000); // stabilization after submit
             }
 
-            // 3) Wait for container to dismiss
+            // 3) Wait for container to dismiss (primary recycle dialog)
             let dismissed = false;
             const t3 = Date.now();
             while (Date.now() - t3 < 6000) {
@@ -920,12 +920,84 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               await sleep(200);
             }
 
-            return { opened, selected, submitClicked, dismissed };
+            // 4) Handle potential follow-up AutoSBC dialog that appears after recycling (Cancel it)
+            let autosbcCancelClicked = false;
+            const findCancelInAutoSbc = (root) => {
+              if (!root) return null;
+              const matchCancel = (txt, aria) => {
+                const t = (txt || '').trim().toLowerCase();
+                const a = (aria || '').trim().toLowerCase();
+                return t === 'cancel' || a === 'cancel' || t === 'close' || a === 'close' || t === 'back' || a === 'back' || t === 'no thanks' || a === 'no thanks';
+              };
+              // Prefer explicit buttons
+              const btns = Array.from(root.querySelectorAll('button, [role="button"], [role="menuitem"]'));
+              for (const b of btns) {
+                const txt = (b.textContent || '').trim().toLowerCase();
+                const aria = (b.getAttribute && (b.getAttribute('aria-label') || '') || '').toLowerCase();
+                if (matchCancel(txt, aria) && isVisible(b) && isEnabled(b)) return b;
+              }
+              // Also inspect spans/divs that might carry the label
+              const spans = Array.from(root.querySelectorAll('span, div, a'));
+              for (const sp of spans) {
+                const t = (sp.textContent || '').trim().toLowerCase();
+                const a = (sp.getAttribute && (sp.getAttribute('aria-label') || '') || '').toLowerCase();
+                if (matchCancel(t, a)) {
+                  const b = sp.closest('button, [role="button"], [role="menuitem"]') || sp;
+                  if (b && isVisible(b) && isEnabled(b)) return b;
+                }
+              }
+              return null;
+            };
+
+            // If primary dismissed, wait briefly for a new AutoSBC container, then click Cancel
+            const waitForAutoSbc = async (ms) => {
+              const start = Date.now();
+              while (Date.now() - start < ms) {
+                const c = document.querySelector('#auto-sbc-container.auto-sbc-container, #auto-sbc-container');
+                if (c && isVisible(c)) return c;
+                await sleep(200);
+              }
+              return null;
+            };
+
+            // Case A: if not dismissed, try to cancel current container
+            if (!dismissed) {
+              const cont = document.querySelector('#auto-sbc-container.auto-sbc-container, #auto-sbc-container');
+              const cancelBtn = findCancelInAutoSbc(cont);
+              if (cancelBtn) {
+                autosbcCancelClicked = await clickEl(cancelBtn.closest('button') || cancelBtn);
+                const tW = Date.now();
+                while (Date.now() - tW < 6000) {
+                  const still = document.querySelector('#auto-sbc-container.auto-sbc-container, #auto-sbc-container');
+                  if (!still || !isVisible(still)) { dismissed = true; break; }
+                  await sleep(200);
+                }
+              }
+            }
+
+            // Case B: after dismissal, a fresh AutoSBC suggestion dialog may appear; cancel it
+            if (dismissed && !autosbcCancelClicked) {
+              const follow = await waitForAutoSbc(8000);
+              if (follow) {
+                const cancelBtn = findCancelInAutoSbc(follow);
+                if (cancelBtn) {
+                  autosbcCancelClicked = await clickEl(cancelBtn.closest('button') || cancelBtn);
+                  const tW2 = Date.now();
+                  while (Date.now() - tW2 < 6000) {
+                    const still = document.querySelector('#auto-sbc-container.auto-sbc-container, #auto-sbc-container');
+                    if (!still || !isVisible(still)) break;
+                    await sleep(200);
+                  }
+                }
+              }
+            }
+
+            return { opened, selected, submitClicked, dismissed, autosbcCancelClicked };
           },
           args: [mode, pickTotw],
         })
         .then((results) => {
-          const agg = { opened: false, selected: false, submitClicked: false, dismissed: false };
+          const agg = { opened: false, selected: false, submitClicked: false, dismissed: false, autosbcCancelClicked: false };
           if (Array.isArray(results)) {
             for (const r of results) {
               if (r && r.result) {
@@ -933,9 +1005,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 agg.selected = agg.selected || !!r.result.selected;
                 agg.submitClicked = agg.submitClicked || !!r.result.submitClicked;
                 agg.dismissed = agg.dismissed || !!r.result.dismissed;
+                agg.autosbcCancelClicked = agg.autosbcCancelClicked || !!r.result.autosbcCancelClicked;
               }
             }
           }
+          // Fire-and-forget: if we cancelled a follow-up AutoSBC dialog, immediately trigger quick sell flow
+          try {
+            if (agg.autosbcCancelClicked) {
+              chrome.runtime.sendMessage({ type: "QUICK_SELL_UNTRADEABLES", tabId });
+            }
+          } catch {}
           sendResponse({ ok: true, mode, ...agg });
         })
         .catch((err) => sendResponse({ ok: false, error: String(err) }));
