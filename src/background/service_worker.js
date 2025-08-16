@@ -224,6 +224,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
             let ellipsisClicked = false;
             if (ell) ellipsisClicked = await clickEl(ell);
+            try { console.log('[Automation][QS] Ellipsis clicked:', ellipsisClicked); } catch {}
             await sleep(1000); // allow menu render (stabilization)
 
             // 2) Click "Quick Sell untradeable items for 0"
@@ -242,8 +243,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }
               if (!qsBtn) await sleep(250);
             }
+            if (!qsBtn) { try { console.warn('[Automation][QS] Quick Sell button not found within 8s'); } catch {} }
             let quickSellClicked = false;
-            if (qsBtn) quickSellClicked = await clickEl(qsBtn.closest('button') || qsBtn);
+            if (qsBtn) {
+              quickSellClicked = await clickEl(qsBtn.closest('button') || qsBtn);
+              try { console.log('[Automation][QS] Quick Sell clicked:', quickSellClicked); } catch {}
+            }
             await sleep(1000); // allow confirm dialog to appear (stabilization)
 
             // 3) Confirm OK
@@ -286,6 +291,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }
               if (!okBtn) await sleep(250);
             }
+            if (okBtn) { try { console.log('[Automation][QS] OK/Confirm button found on first try'); } catch {} }
+            else { try { console.warn('[Automation][QS] OK/Confirm button not found; retrying Quick Sell once'); } catch {} }
             // If OK didn't show, retry Quick Sell once
             if (!okBtn && qsBtn) {
               await clickEl(qsBtn.closest('button') || qsBtn);
@@ -306,6 +313,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 try { okTarget.focus && okTarget.focus(); okTarget.click && okTarget.click(); confirmClicked = true; } catch {}
               }
             }
+            try { console.log('[Automation][QS] Confirm clicked:', confirmClicked); } catch {}
             // Final keyboard fallback only on OK target
             if (!confirmClicked && okBtn) {
               try {
@@ -330,7 +338,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               if (dialogGone()) { dismissed = true; break; }
               await sleep(200);
             }
-
+            try { console.log('[Automation][QS] Dialog dismissed:', dismissed, 'elapsedMs=', Date.now() - t3); } catch {}
             return finish({ ellipsisClicked, quickSellClicked, confirmClicked, dismissed });
             } catch (e) {
               try { console.error('[Automation] QUICK_SELL_UNTRADEABLES error:', e); } catch {}
@@ -564,6 +572,208 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         })
         .catch((err) => sendResponse({ ok: false, error: String(err) }));
       return true; // async
+    }
+
+    if (message.type === "RECYCLE_WORKFLOW") {
+      const tabId = sender?.tab?.id;
+      if (!tabId) {
+        sendResponse({ ok: false, error: "No tabId for recycle workflow" });
+        return;
+      }
+      const mode = message.mode; // 'OVR89' or 'X10_84'
+      chrome.scripting
+        .executeScript({
+          target: { tabId, allFrames: true },
+          world: "MAIN",
+          func: async (mode) => {
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+            const isVisible = (el) => {
+              const cs = getComputedStyle(el);
+              if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0' || cs.pointerEvents === 'none') return false;
+              const r = el.getBoundingClientRect();
+              return r.width > 1 && r.height > 1 && r.bottom > 0 && r.right > 0 && r.left < innerWidth && r.top < innerHeight;
+            };
+            const isEnabled = (el) => {
+              if (el.matches('[disabled], [aria-disabled="true"]')) return false;
+              const cls = el.className || '';
+              if (/\bdisabled\b|\bis-disabled\b|\bbtn-disabled\b/i.test(cls)) return false;
+              return true;
+            };
+            const highlight = (el) => {
+              try {
+                const r = el.getBoundingClientRect();
+                const div = document.createElement('div');
+                div.style.position = 'fixed';
+                div.style.left = r.left + 'px';
+                div.style.top = r.top + 'px';
+                div.style.width = r.width + 'px';
+                div.style.height = r.height + 'px';
+                div.style.border = '2px solid #00e5ff';
+                div.style.borderRadius = '6px';
+                div.style.zIndex = '2147483647';
+                div.style.pointerEvents = 'none';
+                div.style.boxShadow = '0 0 12px rgba(0,229,255,0.8)';
+                document.documentElement.appendChild(div);
+                setTimeout(() => div.remove(), 1000);
+              } catch {}
+            };
+            const clickEl = async (el) => {
+              if (!el || !isVisible(el) || !isEnabled(el)) return false;
+              el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+              await sleep(40);
+              const r = el.getBoundingClientRect();
+              const cx = Math.max(0, Math.floor(r.left + r.width / 2));
+              const cy = Math.max(0, Math.floor(r.top + r.height / 2));
+              const topEl = document.elementFromPoint(cx, cy) || el;
+              const target = topEl.closest('button, [role="button"], .btn-standard, .call-to-action') || topEl || el;
+              highlight(target);
+              const base = { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, button: 0 };
+              try { target.dispatchEvent(new PointerEvent('pointerover', { ...base, pointerType: 'mouse' })); } catch {}
+              try { target.dispatchEvent(new MouseEvent('mouseover', base)); } catch {}
+              try { target.dispatchEvent(new PointerEvent('pointerdown', { ...base, pointerType: 'mouse' })); } catch {}
+              try { target.dispatchEvent(new MouseEvent('mousedown', base)); } catch {}
+              await sleep(20);
+              try { target.dispatchEvent(new PointerEvent('pointerup', { ...base, pointerType: 'mouse' })); } catch {}
+              try { target.dispatchEvent(new MouseEvent('mouseup', base)); } catch {}
+              try { target.dispatchEvent(new MouseEvent('click', base)); } catch {}
+              try { target.click && target.click(); } catch {}
+              await sleep(120);
+              return true;
+            };
+            const textOf = (n) => (n && (n.textContent || n.innerText || '') || '').trim().toLowerCase();
+            const waitForContainer = async () => {
+              const start = Date.now();
+              while (Date.now() - start < 8000) {
+                const c = document.querySelector('#auto-sbc-container.auto-sbc-container, #auto-sbc-container');
+                if (c && isVisible(c)) return c;
+                await sleep(200);
+              }
+              return null;
+            };
+
+            // 0) Open recycle popup by clicking #auto-sbc-recycle
+            let opened = false;
+            const t0 = Date.now();
+            while (!opened && Date.now() - t0 < 8000) {
+              const btn = document.querySelector('#auto-sbc-recycle');
+              if (btn && isVisible(btn) && isEnabled(btn)) {
+                opened = await clickEl(btn);
+                break;
+              }
+              await sleep(250);
+            }
+            await sleep(400);
+
+            const container = await waitForContainer();
+            if (!container) {
+              return { opened, selected: false, submitClicked: false, dismissed: false, error: 'container_not_found' };
+            }
+
+            // 1) Select SBC option based on mode
+            let targetBtn = null;
+            const selStart = Date.now();
+            while (!targetBtn && Date.now() - selStart < 6000) {
+              const buttons = Array.from(container.querySelectorAll('button'));
+              for (const b of buttons) {
+                const t = textOf(b);
+                if (mode === 'OVR89' && t.includes('89 ovr squadshifter')) { targetBtn = b; break; }
+                if (mode === 'X10_84' && (t.includes('84+ x10 upgrade') || t.includes('84 + x10 upgrade'))) { targetBtn = b; break; }
+              }
+              if (!targetBtn) await sleep(200);
+            }
+            let selected = false;
+            if (targetBtn) selected = await clickEl(targetBtn.closest('button') || targetBtn);
+            await sleep(1000); // stabilization after selecting SBC
+
+            // 2) Click Submit button (robust)
+            const dialogGone = () => !document.querySelector('#auto-sbc-container.auto-sbc-container, #auto-sbc-container');
+            let submit = null;
+            const t2 = Date.now();
+            while (!submit && Date.now() - t2 < 6000) {
+              // Prefer inside container, then global fallback by id
+              submit = container.querySelector('#auto-sbc-recycle-submit')
+                || document.querySelector('#auto-sbc-recycle-submit')
+                || Array.from(container.querySelectorAll('button')).find((b) => textOf(b) === 'submit' || textOf(b).includes('submit'));
+              if (submit && (!isVisible(submit) || !isEnabled(submit))) submit = null;
+              if (!submit) await sleep(200);
+            }
+            let submitClicked = false;
+            if (submit) {
+              const trySubmitOnce = async (btn) => {
+                try {
+                  const target = (btn.closest('button') || btn);
+                  // 1) pointer/mouse sequence
+                  const r = target.getBoundingClientRect();
+                  const cx = Math.max(0, Math.floor(r.left + r.width / 2));
+                  const cy = Math.max(0, Math.floor(r.top + r.height / 2));
+                  const base = { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, button: 0 };
+                  target.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+                  await sleep(30);
+                  try { target.dispatchEvent(new PointerEvent('pointerover', { ...base, pointerType: 'mouse' })); } catch {}
+                  try { target.dispatchEvent(new MouseEvent('mouseover', base)); } catch {}
+                  try { target.dispatchEvent(new PointerEvent('pointerdown', { ...base, pointerType: 'mouse' })); } catch {}
+                  try { target.dispatchEvent(new MouseEvent('mousedown', base)); } catch {}
+                  await sleep(15);
+                  try { target.dispatchEvent(new PointerEvent('pointerup', { ...base, pointerType: 'mouse' })); } catch {}
+                  try { target.dispatchEvent(new MouseEvent('mouseup', base)); } catch {}
+                  try { target.dispatchEvent(new MouseEvent('click', base)); } catch {}
+                  // 2) programmatic click
+                  try { target.click && target.click(); } catch {}
+                  // 3) keyboard fallback
+                  try { target.focus && target.focus(); } catch {}
+                  try { target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true })); } catch {}
+                  try { target.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true })); } catch {}
+                  try { target.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true })); } catch {}
+                  try { target.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', bubbles: true })); } catch {}
+                  // 4) form submit fallback if inside a form
+                  try { const form = target.closest('form'); form && form.submit && form.submit(); } catch {}
+                  return true;
+                } catch { return false; }
+              };
+              // Multi-attempt strategy with small delays and re-querying
+              const startClick = Date.now();
+              while (Date.now() - startClick < 4000 && !dialogGone()) {
+                if (!submit || !isVisible(submit) || !isEnabled(submit)) {
+                  submit = document.querySelector('#auto-sbc-recycle-submit') || submit;
+                }
+                if (submit && isVisible(submit) && isEnabled(submit)) {
+                  submitClicked = await trySubmitOnce(submit);
+                }
+                await sleep(200);
+                if (dialogGone()) break;
+              }
+              await sleep(1000); // stabilization after submit
+            }
+
+            // 3) Wait for container to dismiss
+            let dismissed = false;
+            const t3 = Date.now();
+            while (Date.now() - t3 < 6000) {
+              const c = document.querySelector('#auto-sbc-container.auto-sbc-container, #auto-sbc-container');
+              if (!c || !isVisible(c)) { dismissed = true; break; }
+              await sleep(200);
+            }
+
+            return { opened, selected, submitClicked, dismissed };
+          },
+          args: [mode],
+        })
+        .then((results) => {
+          const agg = { opened: false, selected: false, submitClicked: false, dismissed: false };
+          if (Array.isArray(results)) {
+            for (const r of results) {
+              if (r && r.result) {
+                agg.opened = agg.opened || !!r.result.opened;
+                agg.selected = agg.selected || !!r.result.selected;
+                agg.submitClicked = agg.submitClicked || !!r.result.submitClicked;
+                agg.dismissed = agg.dismissed || !!r.result.dismissed;
+              }
+            }
+          }
+          sendResponse({ ok: true, mode, ...agg });
+        })
+        .catch((err) => sendResponse({ ok: false, error: String(err) }));
+      return true;
     }
   } catch (err) {
     console.error("Background error:", err);

@@ -253,6 +253,18 @@
     } catch { return null; }
   }
 
+  function hasX10CriteriaFromHistogram(hist) {
+    try {
+      const count84 = (hist[84] || hist['84'] || 0);
+      const any85 = (hist[85] || hist['85'] || 0) > 0;
+      const any86 = (hist[86] || hist['86'] || 0) > 0;
+      // Align with decideRecycleModeFromHistogram: X10_84 when we have enough 84s or any 85/86
+      return count84 >= 4 || any85 || any86;
+    } catch {
+      return false;
+    }
+  }
+
   function diffHistograms(prev, curr) {
     const out = {};
     const keys = new Set([
@@ -354,6 +366,9 @@
       if (!runs) return;
 
       for (let i = 0; i < runs; i++) {
+        const iterStart = Date.now();
+        const iterTimeoutMs = 45000; // watchdog for a single iteration
+        const deadlineExceeded = () => (Date.now() - iterStart) > iterTimeoutMs;
         // 1) Click the Open button
         const openBtn = await waitForButton([
           'button.currency.call-to-action',
@@ -365,6 +380,11 @@
           break;
         }
         await clickElement(openBtn);
+        if (deadlineExceeded()) {
+          console.warn('[Automation] Iteration watchdog: deadline exceeded after clicking Open');
+          await sleep(600);
+          continue;
+        }
 
         // 2) Wait for purchased/items after opening, then compute fast path
         let latestEvent = null;
@@ -388,17 +408,54 @@
           const mode = decideRecycleModeFromHistogram(hist);
           console.log('[Automation] All duplicates detected; skipping Send All. Decision:', { mode, hist });
           try {
-            if (mode) {
-              const res = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode });
-              console.log('[Automation] RECYCLE_WORKFLOW result:', res);
+            if (mode === 'OVR89') {
+              const res1 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'OVR89' });
+              console.log('[Automation] RECYCLE_WORKFLOW OVR89 result:', res1);
+              await sleep(1000);
+              // Refresh histogram after OVR89 to decide next step
+              let refreshed = null;
+              try { refreshed = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after OVR89 within 8s:', e); }
+              const hist2 = (refreshed && computeRatingHistogram(refreshed.data)) || lastRatingHistogram || hist;
+              console.log('[Automation] Histogram after OVR89:', hist2);
+              // Run X10_84 repeatedly while criteria remain (safety cap 3), then quick sell
+              let xHist = hist2;
+              for (let pass = 0; pass < 3; pass++) {
+                if (!hasX10CriteriaFromHistogram(xHist)) break;
+                const res2 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
+                console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res2);
+                await sleep(1000);
+                let ref = null;
+                try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
+                xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
+                console.log('[Automation] Histogram after X10_84 pass:', xHist);
+              }
+              const q = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
+              console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
+            } else if (mode === 'X10_84') {
+              // Recycle X10_84 repeatedly while criteria hold
+              let xHist = lastRatingHistogram || {};
+              for (let pass = 0; pass < 3; pass++) {
+                if (!hasX10CriteriaFromHistogram(xHist)) break;
+                const res = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
+                console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res);
+                await sleep(1000);
+                let ref = null;
+                try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
+                xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
+                console.log('[Automation] Histogram after X10_84 pass:', xHist);
+              }
+              const q = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
+              console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
             } else {
-              const res = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
-              console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', res);
+              const q = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
+              console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
             }
           } catch (e) {
             console.warn('[Automation] Fast-path action error:', e);
           }
-          break; // finish this run after post action
+          // finish this run, then continue to next iteration
+          await sleep(600);
+          continue;
         }
 
         // 3) Click "Send All To Club" first
@@ -425,22 +482,64 @@
 
         // Enforce order: after pressing Send All, wait 1s, then take action (stabilization)
         if (clicked) {
+          if (deadlineExceeded()) {
+            console.warn('[Automation] Iteration watchdog: deadline exceeded before post-send actions');
+            await sleep(600);
+            continue;
+          }
           await sleep(1000);
           const hist = lastRatingHistogram || {};
           const mode = decideRecycleModeFromHistogram(hist);
           console.log('[Automation] Decision after Send All (using latest histogram):', { mode, hist });
           try {
-            if (mode) {
-              const res = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode });
-              console.log('[Automation] RECYCLE_WORKFLOW result:', res);
+            if (mode === 'OVR89') {
+              const res1 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'OVR89' });
+              console.log('[Automation] RECYCLE_WORKFLOW OVR89 result:', res1);
+              await sleep(1000);
+              // Refresh histogram after OVR89 to decide next step
+              let refreshed = null;
+              try { refreshed = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after OVR89 within 8s:', e); }
+              const hist2 = (refreshed && computeRatingHistogram(refreshed.data)) || lastRatingHistogram || hist;
+              console.log('[Automation] Histogram after OVR89:', hist2);
+              // Run X10_84 repeatedly while criteria remain (safety cap 3), then quick sell
+              let xHist = hist2;
+              for (let pass = 0; pass < 3; pass++) {
+                if (!hasX10CriteriaFromHistogram(xHist)) break;
+                const res2 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
+                console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res2);
+                await sleep(1000);
+                let ref = null;
+                try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
+                xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
+                console.log('[Automation] Histogram after X10_84 pass:', xHist);
+              }
+              const q = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
+              console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
+            } else if (mode === 'X10_84') {
+              // Recycle X10_84 repeatedly while criteria hold
+              let xHist = lastRatingHistogram || {};
+              for (let pass = 0; pass < 3; pass++) {
+                if (!hasX10CriteriaFromHistogram(xHist)) break;
+                const res = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
+                console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res);
+                await sleep(1000);
+                let ref = null;
+                try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
+                xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
+                console.log('[Automation] Histogram after X10_84 pass:', xHist);
+              }
+              const q = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
+              console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
             } else {
-              const res = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
-              console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', res);
+              const q = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
+              console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
             }
           } catch (e) {
             console.warn('[Automation] Post-send action error:', e);
           }
-          break; // finish this run after post action
+          // finish this run, then continue to next iteration
+          await sleep(600);
+          continue;
         }
 
         // Case: No Send All button → only decide directly if all duplicates; otherwise do nothing (wait for next run)
@@ -449,16 +548,60 @@
           const stats2 = computeItemsStats(latestData2);
           console.log('[Automation] Re-check items stats (no Send All clicked):', stats2);
           if (stats2.available && stats2.allDuplicates) {
+            if (deadlineExceeded()) {
+              console.warn('[Automation] Iteration watchdog: deadline exceeded before direct decision actions');
+              await sleep(600);
+              continue;
+            }
             const hist = lastRatingHistogram || {};
             const mode = decideRecycleModeFromHistogram(hist);
             console.log('[Automation] No Send All; all duplicates. Deciding directly:', { mode, hist });
             try {
-              if (mode) {
-                const res = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode });
-                console.log('[Automation] RECYCLE_WORKFLOW result:', res);
+              if (mode === 'OVR89') {
+                const res1 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'OVR89' });
+                console.log('[Automation] RECYCLE_WORKFLOW OVR89 result:', res1);
+                await sleep(1000);
+                // Refresh histogram after OVR89 to decide next step
+                let refreshed = null;
+                try { refreshed = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after OVR89 within 8s:', e); }
+                const hist2 = (refreshed && computeRatingHistogram(refreshed.data)) || lastRatingHistogram || hist;
+                console.log('[Automation] Histogram after OVR89:', hist2);
+                if (hasX10CriteriaFromHistogram(hist2)) {
+                  let xHist = hist2;
+                  for (let pass = 0; pass < 3; pass++) {
+                    if (!hasX10CriteriaFromHistogram(xHist)) break;
+                    const res2 = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
+                    console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res2);
+                    await sleep(1000);
+                    let ref = null;
+                    try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
+                    xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
+                    console.log('[Automation] Histogram after X10_84 pass:', xHist);
+                  }
+                  const q = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
+                  console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
+                } else {
+                  const q = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
+                  console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
+                }
+              } else if (mode === 'X10_84') {
+                // Recycle X10_84 repeatedly while criteria hold
+                let xHist = lastRatingHistogram || {};
+                for (let pass = 0; pass < 3; pass++) {
+                  if (!hasX10CriteriaFromHistogram(xHist)) break;
+                  const res = await chrome.runtime.sendMessage({ type: 'RECYCLE_WORKFLOW', mode: 'X10_84' });
+                  console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res);
+                  await sleep(1000);
+                  let ref = null;
+                  try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
+                  xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
+                  console.log('[Automation] Histogram after X10_84 pass:', xHist);
+                }
+                const q = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
+                console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
               } else {
-                const res = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
-                console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', res);
+                const q = await chrome.runtime.sendMessage({ type: 'QUICK_SELL_UNTRADEABLES' });
+                console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
               }
             } catch (e) {
               console.warn('[Automation] Direct decision action error:', e);
@@ -466,7 +609,9 @@
           } else {
             console.warn('[Automation] Send All not clicked and not all duplicates; will wait for next run.');
           }
-          break; // finish this run after post action
+          // finish this run, then continue to next iteration
+          await sleep(600);
+          continue;
         }
 
         // Small delay between runs
