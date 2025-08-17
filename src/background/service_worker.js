@@ -133,6 +133,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           world: "MAIN",
           func: async () => {
             const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+            async function sleepLog(ms, label = 'qs-sleep') {
+              const t0 = Date.now();
+              try { console.log(`[Automation][QS][wait] ${label} start ms=${ms} at ${t0}`); } catch {}
+              await sleep(ms);
+              try { console.log(`[Automation][QS][wait] ${label} end elapsed=${Date.now() - t0}ms`); } catch {}
+            }
             // Allow running in all frames; only frames containing elements will act
             if (window.__ea_qs_inflight) {
               return { skipped: true, reason: 'inflight' };
@@ -236,6 +242,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               try { if (document.body) document.body.scrollTop = 0; } catch {}
               await sleep(50);
             };
+            // Wait for the bulk action popup container (deep across shadow DOM)
+            const waitForBulkPopup = async (ms = 6000) => {
+              const containerSelectors = [
+                '.ut-bulk-action-popup-view',
+                '.ut-bulk-action',
+                '.ut-bulk-actions',
+                '[role="menu"]',
+                '.context-menu',
+                '.menu',
+                'ul[role="menu"]'
+              ];
+              const deepFind = () => {
+                const results = [];
+                const scan = (root) => {
+                  for (const sel of containerSelectors) {
+                    try { results.push(...root.querySelectorAll(sel)); } catch {}
+                  }
+                  let nodes = [];
+                  try { nodes = root.querySelectorAll('*'); } catch {}
+                  for (const el of nodes) {
+                    if (el && el.shadowRoot) scan(el.shadowRoot);
+                  }
+                };
+                scan(document);
+                // Prefer visible and floating (not hidden in layout)
+                return results.find((n) => n && isVisible(n)) || null;
+              };
+              const start = Date.now();
+              while (Date.now() - start < ms) {
+                const c = deepFind();
+                if (c) return c;
+                await sleep(150);
+              }
+              return null;
+            };
             // Pre-step: handle "Unassigned Items Remain" dialog if present
             let takeMeThereClicked = false;
             const matchTakeMeThere = (txt, aria) => {
@@ -311,42 +352,143 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (ell) {
               ellipsisClicked = await clickEl(ell);
               try { console.log('[Automation][QS] Ellipsis clicked:', ellipsisClicked); } catch {}
-              await sleepLog(600, 'after-ellipsis'); // allow menu render (stabilization)
+              await sleepLog(1200, 'after-ellipsis'); // allow menu render (stabilization)
             } else {
               try { console.warn('[Automation][QS] Ellipsis button not found'); } catch {}
             }
 
             // 2) From popup, click: "Quick Sell untradeable items for 0"
-            const isInlineKeyQuickSell = (n) => !!(n && (n.closest && n.closest('.key-quick-sell-btn')));
-            const matchPopupQuickSell = (txt, node, aria) => {
-              const label = `${txt} ${aria}`;
-              const hasQuickSell = label.includes('quick sell');
-              const hasUntrade = label.includes('untradeable') || label.includes('untradable') || label.includes('untradeble');
-              const hasZero = /\b0\b/.test(label) || /for\s*0/.test(label) || /0\s*coins?/.test(label);
-              return hasQuickSell && hasUntrade && hasZero;
+            const isInlineKeyQuickSell = (n) => {
+              if (!n || !(n.closest)) return false;
+              const inPopup = !!n.closest('.ut-bulk-action-popup-view');
+              const isInline = !!n.closest('.key-quick-sell-btn');
+              // Only treat as inline (to skip) when it's NOT inside the popup menu
+              return isInline && !inPopup;
             };
+            const matchPopupQuickSell = (txt, node, aria) => {
+              // Be tolerant: just require quick sell + untrad(e)able, amount may vary or be hidden
+              const label = `${txt} ${aria}`.replace(/\s+/g, ' ').toLowerCase();
+              const hasQuickSell = /quick\s*sell/.test(label);
+              const hasUntrade = /(untrad(ea|a)?ble)/.test(label);
+              return hasQuickSell && hasUntrade;
+            };
+            // Prefer a scoped search inside the bulk action popup
             let qsBtn = null;
-            const t1 = Date.now();
-            while (!qsBtn && Date.now() - t1 < 8000) {
-              qsBtn = findByText((txt, node, aria) => {
-                if (isInlineKeyQuickSell(node)) return false; // avoid inline quick sell button
-                return matchPopupQuickSell(txt, node, aria);
-              });
-              if (qsBtn && (!isVisible(qsBtn) || !isEnabled(qsBtn))) qsBtn = null;
-              if (!qsBtn) await sleep(250);
+            let popup = await waitForBulkPopup(6000);
+            if (popup) {
+              // Helper to search within popup including nested shadow roots
+              const deepWithin = (root, sel) => {
+                const out = [];
+                const scan = (node) => {
+                  if (!node) return;
+                  try { out.push(...node.querySelectorAll(sel)); } catch {}
+                  let all = [];
+                  try { all = node.querySelectorAll('*'); } catch {}
+                  for (const el of all) { if (el && el.shadowRoot) scan(el.shadowRoot); }
+                };
+                scan(root);
+                return out;
+              };
+              const btns = Array.from(new Set([
+                ...deepWithin(popup, 'button'),
+                ...deepWithin(popup, '[role="button"]'),
+                ...deepWithin(popup, '[role="menuitem"]')
+              ]));
+              for (const b of btns) {
+                const txt = textOf(b);
+                const aria = (b.getAttribute && (b.getAttribute('aria-label') || '') || '').toLowerCase();
+                if (matchPopupQuickSell(txt, b, aria) && isVisible(b) && isEnabled(b)) { qsBtn = b; break; }
+                const sp = b.querySelector('span.btn-text, span');
+                if (sp) {
+                  const st = textOf(sp);
+                  const sa = (sp.getAttribute && (sp.getAttribute('aria-label') || '') || '').toLowerCase();
+                  if (matchPopupQuickSell(st, sp, sa)) { qsBtn = b; break; }
+                }
+              }
+              // As a broader fallback inside popup, scan all elements for a matching label and bubble to clickable
+              if (!qsBtn) {
+                const all = Array.from(popup.querySelectorAll('*'));
+                const candidates = [];
+                for (const el of all) {
+                  const t = textOf(el);
+                  const a = (el.getAttribute && (el.getAttribute('aria-label') || '') || '').toLowerCase();
+                  if (matchPopupQuickSell(t, el, a)) {
+                    let clickable = el.closest('button, [role="button"], [role="menuitem"], li, a, div');
+                    if (!clickable) clickable = el;
+                    if (isVisible(clickable) && isEnabled(clickable)) { candidates.push(clickable); }
+                  }
+                }
+                if (candidates.length) {
+                  // Prefer the first unique clickable
+                  const seen = new Set();
+                  qsBtn = candidates.find(c => { if (seen.has(c)) return false; seen.add(c); return true; }) || candidates[0];
+                  try { console.log('[Automation][QS] Popup fallback matched candidates count:', candidates.length); } catch {}
+                }
+              }
+              // Fallback: accept any option with "quick sell" if specific phrasing isn't found
+              if (!qsBtn) {
+                for (const b of btns) {
+                  const label = `${textOf(b)} ${(b.getAttribute && (b.getAttribute('aria-label') || '') || '').toLowerCase()}`;
+                  if (/quick\s*sell/.test(label) && isVisible(b) && isEnabled(b)) { qsBtn = b; break; }
+                  const sp = b.querySelector('span.btn-text, span');
+                  if (sp) {
+                    const spLabel = `${textOf(sp)} ${(sp.getAttribute && (sp.getAttribute('aria-label') || '') || '').toLowerCase()}`;
+                    if (/quick\s*sell/.test(spLabel)) { qsBtn = b; break; }
+                  }
+                }
+              }
             }
-            if (!qsBtn && ellipsisClicked) {
-              // Retry once by re-clicking ellipsis in case menu closed
-              await clickEl(ell);
-              await sleepLog(500, 'retry-ellipsis-menu');
-              const t1b = Date.now();
-              while (!qsBtn && Date.now() - t1b < 4000) {
+            // Global fallback if not found in popup
+            if (!qsBtn) {
+              const t1 = Date.now();
+              while (!qsBtn && Date.now() - t1 < 8000) {
                 qsBtn = findByText((txt, node, aria) => {
-                  if (isInlineKeyQuickSell(node)) return false;
+                  if (isInlineKeyQuickSell(node)) return false; // avoid inline quick sell button
                   return matchPopupQuickSell(txt, node, aria);
                 });
                 if (qsBtn && (!isVisible(qsBtn) || !isEnabled(qsBtn))) qsBtn = null;
-                if (!qsBtn) await sleep(200);
+                if (!qsBtn) await sleep(250);
+              }
+              // If still not found, log available menu options for diagnostics (broad)
+              try {
+                const menus = Array.from(document.querySelectorAll('.ut-bulk-action-popup-view, .ut-bulk-action, .ut-bulk-actions, [role="menu"], .context-menu, .menu, ul[role="menu"]'));
+                const labels = [];
+                for (const m of menus) {
+                  const items = Array.from(m.querySelectorAll('button, [role="button"], [role="menuitem"], li, a, div'));
+                  for (const it of items) {
+                    if (!isVisible(it)) continue;
+                    const t = (it.textContent || '').trim().replace(/\s+/g,' ');
+                    const a = (it.getAttribute && it.getAttribute('aria-label')) || '';
+                    const line = t || a || '[no-text]';
+                    if (line) labels.push(line);
+                  }
+                }
+                if (labels.length) console.warn('[Automation][QS] Menu options seen (broad):', labels);
+              } catch {}
+              if (!qsBtn && ellipsisClicked && ell) {
+                // Retry once by re-opening the ellipsis menu and re-checking the popup
+                await clickEl(ell);
+                await sleepLog(500, 'retry-ellipsis-menu');
+                popup = await waitForBulkPopup(4000);
+                if (popup && !qsBtn) {
+                  const btns = Array.from(popup.querySelectorAll('button, [role="button"], [role="menuitem"]'));
+                  for (const b of btns) {
+                    const txt = textOf(b);
+                    const aria = (b.getAttribute && (b.getAttribute('aria-label') || '') || '').toLowerCase();
+                    if (matchPopupQuickSell(txt, b, aria) && isVisible(b) && isEnabled(b)) { qsBtn = b; break; }
+                    const sp = b.querySelector('span.btn-text, span');
+                    if (sp) {
+                      const st = textOf(sp);
+                      const sa = (sp.getAttribute && (sp.getAttribute('aria-label') || '') || '').toLowerCase();
+                      if (matchPopupQuickSell(st, sp, sa)) { qsBtn = b; break; }
+                    }
+                  }
+                }
+                // Final broad fallback: any visible menuitem containing "quick sell"
+                if (!qsBtn) {
+                  const anyQuick = findByText((txt, node, aria) => /quick\s*sell/i.test(`${txt} ${aria}`));
+                  if (anyQuick && isVisible(anyQuick) && isEnabled(anyQuick)) qsBtn = anyQuick;
+                }
               }
             }
             if (!qsBtn) { try { console.warn('[Automation][QS] Popup Quick Sell option not found'); } catch {} }
@@ -390,9 +532,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             let okBtn = null;
             const t2 = Date.now();
             while (!okBtn && Date.now() - t2 < 12000) {
-              okBtn = findOkInDialogs() || findByText((txt, node, aria) => matchOk(txt, aria));
-              if (okBtn) {
-                if (!isVisible(okBtn) || !isEnabled(okBtn)) okBtn = null;
+              // Prefer finding OK within the bulk action popup view
+              const pop = document.querySelector('.ut-bulk-action-popup-view');
+              if (pop) {
+                const btns = Array.from(pop.querySelectorAll('button, [role="button"], [role="menuitem"]'));
+                for (const b of btns) {
+                  const txt = textOf(b);
+                  const aria = (b.getAttribute && (b.getAttribute('aria-label') || '') || '').toLowerCase();
+                  if (matchOk(txt, aria) && isVisible(b) && isEnabled(b)) { okBtn = b; break; }
+                }
+              }
+              if (!okBtn) {
+                okBtn = findOkInDialogs() || findByText((txt, node, aria) => matchOk(txt, aria));
+                if (okBtn && (!isVisible(okBtn) || !isEnabled(okBtn))) okBtn = null;
               }
               if (!okBtn) await sleep(250);
             }
