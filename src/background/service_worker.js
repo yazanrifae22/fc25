@@ -585,7 +585,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
             // Give the UI time to process confirmation and start dismissing dialog (stabilization)
             if (okBtn) {
-              await sleepLog(3000, 'after-confirm-click');
+              await sleepLog(987, 'after-confirm-click');
             }
             // Wait for dialog dismissal to ensure flow completes
             let dismissed = false;
@@ -835,13 +835,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             };
             await scrollToTop();
             const start = Date.now();
-            while (Date.now() - start < 25000) { // up to 25s
+            while (Date.now() - start < 12000) { // up to 12s
               const el = find();
               if (el && isEnabled(el)) {
                 tryClick(el);
                 return { clicked: true };
               }
-              await sleep(250);
+              await sleep(200);
             }
             return { clicked: false };
           },
@@ -968,13 +968,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             };
             await scrollToTop();
             const start = Date.now();
-            while (Date.now() - start < 20000) { // up to 20s
+            while (Date.now() - start < 12000) { // up to 12s
               const el = find();
               if (el && isEnabled(el)) {
                 tryClick(el);
                 return { clicked: true };
               }
-              await sleep(250);
+              await sleep(200);
             }
             return { clicked: false };
           },
@@ -1096,7 +1096,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const textOf = (n) => (n && (n.textContent || n.innerText || '') || '').trim().toLowerCase();
             const waitForContainer = async () => {
               const start = Date.now();
-              while (Date.now() - start < 8000) {
+              while (Date.now() - start < 5000) {
                 const c = document.querySelector('#auto-sbc-container.auto-sbc-container, #auto-sbc-container');
                 if (c && isVisible(c)) return c;
                 await sleep(200);
@@ -1114,7 +1114,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             // 0) Open recycle popup by clicking #auto-sbc-recycle
             let opened = false;
             const t0 = Date.now();
-            while (!opened && Date.now() - t0 < 8000) {
+            while (!opened && Date.now() - t0 < 5000) {
               const btn = document.querySelector('#auto-sbc-recycle');
               if (btn && isVisible(btn) && isEnabled(btn)) {
                 opened = await humanClick(btn);
@@ -1123,16 +1123,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               await sleep(250);
             }
             // Stabilize after opening recycle popup
-            await sleepLog(3000, 'after-open-recycle');
+            await sleepLog(800, 'after-open-recycle');
 
             const container = await waitForContainer();
             if (!container) {
               // Fallback: try to select and submit directly by global text search
               try { console.debug('[Automation][RECYCLE] Container not found; using global fallback'); } catch {}
               let targetBtn = null;
-              await sleepLog(3000, 'fallback-before-select-mode');
+              await sleepLog(800, 'fallback-before-select-mode');
               const selStart2 = Date.now();
-              while (!targetBtn && Date.now() - selStart2 < 6000) {
+              while (!targetBtn && Date.now() - selStart2 < 4000) {
                 targetBtn = findByText((txt, node, aria) => {
                   if (mode === 'OVR89') {
                     return (txt.includes('89') && (txt.includes('ovr') || txt.includes('squadshifter') || txt.includes('squad shifter')))
@@ -1153,7 +1153,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               // Try to find a submit/confirm button globally
               let submit = null;
               const tSub2 = Date.now();
-              while (!submit && Date.now() - tSub2 < 6000) {
+              while (!submit && Date.now() - tSub2 < 4000) {
                 submit = findByText((txt, node, aria) => {
                   const label = `${txt} ${aria}`;
                   return label.includes('submit') || label.includes('confirm') || label.includes('proceed') || label.includes('continue') || label === 'ok' || label.includes('ok ');
@@ -1163,9 +1163,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }
               let submitClicked = false;
               if (submit) {
-                await sleepLog(3000, 'fallback-before-submit');
+                await sleepLog(800, 'fallback-before-submit');
                 submitClicked = await humanClick(submit.closest('button') || submit);
-                await sleepLog(3000, 'fallback-after-submit');
+                await sleepLog(800, 'fallback-after-submit');
               }
 
               // Consider dismissed if no obvious dialog elements present
@@ -1174,10 +1174,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
 
             // 1) Select SBC option based on mode
-            await sleepLog(3000, 'before-select-mode');
+            await sleepLog(800, 'before-select-mode');
             let targetBtn = null;
             const selStart = Date.now();
-            while (!targetBtn && Date.now() - selStart < 6000) {
+            while (!targetBtn && Date.now() - selStart < 4000) {
               const buttons = Array.from(container.querySelectorAll('button'));
               let candX10 = null;
               let candTotw = null;
@@ -1198,14 +1198,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
             let selected = false;
             if (targetBtn) selected = await humanClick(targetBtn.closest('button') || targetBtn);
-            await sleepLog(3000, 'after-select-mode'); // stabilization after selecting SBC
+            await sleepLog(800, 'after-select-mode'); // stabilization after selecting SBC
 
             // 2) Click Submit button (robust)
             const dialogGone = () => !document.querySelector('#auto-sbc-container.auto-sbc-container, #auto-sbc-container');
             let submit = null;
             const t2 = Date.now();
             // Wait before attempting to submit
-            await sleepLog(3000, 'before-submit');
+            await sleepLog(800, 'before-submit');
             while (!submit && Date.now() - t2 < 6000) {
               // Prefer inside container, then global fallback by id
               submit = container.querySelector('#auto-sbc-recycle-submit')
@@ -1221,7 +1221,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               };
               // Multi-attempt strategy with small delays and re-querying
               const startClick = Date.now();
-              while (Date.now() - startClick < 4000 && !dialogGone()) {
+              while (Date.now() - startClick < 2500 && !dialogGone()) {
                 if (!submit || !isVisible(submit) || !isEnabled(submit)) {
                   submit = document.querySelector('#auto-sbc-recycle-submit') || submit;
                 }
@@ -1231,13 +1231,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 await sleep(200);
                 if (dialogGone()) break;
               }
-              await sleepLog(3000, 'after-submit'); // stabilization after submit
+              await sleepLog(800, 'after-submit'); // stabilization after submit
             }
 
             // 3) Wait for container to dismiss (primary recycle dialog)
             let dismissed = false;
             const t3 = Date.now();
-            while (Date.now() - t3 < 6000) {
+            while (Date.now() - t3 < 4000) {
               const c = document.querySelector('#auto-sbc-container.auto-sbc-container, #auto-sbc-container');
               if (!c || !isVisible(c)) { dismissed = true; break; }
               await sleep(200);
@@ -1290,7 +1290,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               if (cancelBtn) {
                 autosbcCancelClicked = await humanClick(cancelBtn.closest('button') || cancelBtn);
                 const tW = Date.now();
-                while (Date.now() - tW < 6000) {
+                while (Date.now() - tW < 4000) {
                   const still = document.querySelector('#auto-sbc-container.auto-sbc-container, #auto-sbc-container');
                   if (!still || !isVisible(still)) { dismissed = true; break; }
                   await sleep(200);
@@ -1300,13 +1300,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
             // Case B: after dismissal, a fresh AutoSBC suggestion dialog may appear; cancel it
             if (dismissed && !autosbcCancelClicked) {
-              const follow = await waitForAutoSbc(8000);
+              const follow = await waitForAutoSbc(5000);
               if (follow) {
                 const cancelBtn = findCancelInAutoSbc(follow);
                 if (cancelBtn) {
                   autosbcCancelClicked = await humanClick(cancelBtn.closest('button') || cancelBtn);
                   const tW2 = Date.now();
-                  while (Date.now() - tW2 < 6000) {
+                  while (Date.now() - tW2 < 4000) {
                     const still = document.querySelector('#auto-sbc-container.auto-sbc-container, #auto-sbc-container');
                     if (!still || !isVisible(still)) break;
                     await sleep(200);

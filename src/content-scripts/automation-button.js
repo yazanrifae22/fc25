@@ -288,7 +288,7 @@
     let last = null;
     for (let i = 0; i < passes; i++) {
       last = await callBg('QUICK_SELL_UNTRADEABLES', {}, { label: `QUICK_SELL_UNTRADEABLES pass ${i + 1}`, timeoutMs: 60000, retries: 2 });
-      await sleepLog(3000, `after QUICK_SELL pass ${i + 1}`);
+      await sleepLog(987, `after QUICK_SELL pass ${i + 1}`);
     }
     return last;
   }
@@ -374,6 +374,125 @@
     // Consider disabled attribute
     if ('disabled' in el && el.disabled) return false;
     return true;
+  }
+
+  // Scroll the inner unassigned view container (and page) to top to ensure header buttons are visible
+  async function scrollUnassignedContainerToTop() {
+    try {
+      // Scroll the main document to top as a baseline
+      try { window.scrollTo({ top: 0, behavior: 'auto' }); } catch {}
+      try { const se = document.scrollingElement; if (se) se.scrollTop = 0; } catch {}
+
+      const root = document.querySelector('section.ut-unassigned-view.ui-layout-left, section.ut-unassigned-view, .ut-unassigned-view.ui-layout-left, .ut-unassigned-view');
+      let scrolled = false;
+      if (root) {
+        // If the root itself scrolls, reset it
+        try {
+          const cs = getComputedStyle(root);
+          if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') && root.scrollHeight > root.clientHeight + 4) {
+            root.scrollTop = 0;
+            scrolled = true;
+          }
+        } catch {}
+        // Also reset obvious scrollable descendants
+        const kids = root.querySelectorAll('*');
+        for (const el of kids) {
+          try {
+            const cs = getComputedStyle(el);
+            if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 4) {
+              el.scrollTop = 0;
+              scrolled = true;
+            }
+          } catch {}
+        }
+      }
+      // Nudge likely header buttons into view
+      try {
+        const send = document.querySelector('button.btn-standard.autosbc-header-button.section-header-btn.mini.call-to-action, button.btn-standard.call-to-action');
+        if (send) send.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+      } catch {}
+      await sleep(120);
+      return scrolled;
+    } catch {
+      return false;
+    }
+  }
+
+  // Try to resolve transient states when no Open button is visible.
+  // - Click generic OK/Confirm dialogs if present
+  // - Try Quick Sell flow (short timeout)
+  // - Try Send All to Club (short timeout)
+  // Returns true if any recovery action was taken.
+  async function attemptRecoveryBeforeStop() {
+    try {
+      // 1) Generic confirmation dialogs: OK / Confirm / Continue
+      const confirmBtn = await waitForButton([
+        'button',
+        '[role="button"]',
+      ], '', 1500);
+      if (confirmBtn) {
+        const label = ((confirmBtn.getAttribute('aria-label') || confirmBtn.textContent || '').trim().toLowerCase());
+        if (label === 'ok' || label.includes('ok ') || label.includes('confirm') || label.includes('continue') || label.includes('proceed')) {
+          await clickElement(confirmBtn);
+          console.log('[Automation][recovery] Clicked generic confirm/ok');
+          await sleep(400);
+          return true;
+        }
+      }
+
+      // 2) Try a quick, single-attempt Quick Sell to clear confirmations
+      try {
+        const qs = await callBg('QUICK_SELL_UNTRADEABLES', {}, { label: 'QUICK_SELL_UNTRADEABLES recovery', timeoutMs: 12000, retries: 0 });
+        if (qs && qs.ok) {
+          console.log('[Automation][recovery] QUICK_SELL_UNTRADEABLES took action');
+          await sleep(400);
+          return true;
+        }
+      } catch {}
+
+      // 3) Try Send All To Club quickly
+      try {
+        await scrollUnassignedContainerToTop();
+        const send = await callBg('CLICK_SEND_ALL', {}, { label: 'CLICK_SEND_ALL recovery', timeoutMs: 8000, retries: 0 });
+        if (send && send.ok && send.clicked) {
+          console.log('[Automation][recovery] CLICK_SEND_ALL clicked');
+          await sleep(400);
+          return true;
+        }
+        // Local quick check (short)
+        await scrollUnassignedContainerToTop();
+        const sendBtn = await waitForButton([
+          'button.btn-standard.autosbc-header-button.section-header-btn.mini.call-to-action',
+          'button.btn-standard.call-to-action',
+          'button'
+        ], 'Send All To Club', 2000);
+        if (sendBtn) {
+          await clickElement(sendBtn);
+          console.log('[Automation][recovery] Local Send All clicked');
+          await sleep(400);
+          return true;
+        }
+      } catch {}
+
+      // 4) Recycle entry present? If our recycle button is visible, we'll prefer to decide via histogram
+      try {
+        await scrollUnassignedContainerToTop();
+        const recycleBtn = document.querySelector('#auto-sbc-recycle');
+        if (recycleBtn && isVisibleClickable(recycleBtn)) {
+          const mode = decideRecycleModeFromHistogram(lastRatingHistogram || {});
+          if (mode) {
+            const res = await doRecycle(mode, 'recovery');
+            console.log('[Automation][recovery] RECYCLE_WORKFLOW result:', res);
+            await sleep(400);
+            return true;
+          }
+        }
+      } catch {}
+
+      return false;
+    } catch {
+      return false;
+    }
   }
 
   // Detect and handle the "Unassigned Items Remain" dialog
@@ -526,7 +645,26 @@
             'button'
           ], 'Open', 8000);
           if (!openBtn) {
-            console.warn('[Automation] Open button not found. Stopping.');
+            console.warn('[Automation] Open button not found. Attempting recovery before stopping...');
+            const recovered = await attemptRecoveryBeforeStop();
+            if (recovered) {
+              // Give the UI a moment and try next iteration instead of stopping
+              await sleep(400);
+              continue;
+            }
+            // Final guard: ensure there is truly no quick sell or recycle available
+            const quickCheckSend = await waitForButton([
+              'button.btn-standard.autosbc-header-button.section-header-btn.mini.call-to-action',
+              'button.btn-standard.call-to-action',
+              'button'
+            ], 'Send All To Club', 1200);
+            const recycleVisible = !!(document.querySelector('#auto-sbc-recycle') && isVisibleClickable(document.querySelector('#auto-sbc-recycle')));
+            if (quickCheckSend || recycleVisible) {
+              console.warn('[Automation] Recovery hint found (send-all or recycle). Continuing loop.');
+              await sleep(400);
+              continue;
+            }
+            console.warn('[Automation] Open button not found and no recovery actions available. Stopping.');
             break;
           }
           const localClicked = await clickElement(openBtn);
@@ -543,7 +681,7 @@
         }
 
         // Stabilize after opening the pack before proceeding
-        await sleepLog(3000, 'post-open-stabilize');
+        await sleepLog(987, 'post-open-stabilize');
 
         // Handle Unassigned dialog immediately after Open
         const diverted = await handleUnassignedDialogIfPresent(6000);
@@ -592,7 +730,7 @@
             if (mode === 'OVR89') {
               const res1 = await doRecycle('OVR89');
               console.log('[Automation] RECYCLE_WORKFLOW OVR89 result:', res1);
-              await sleepLog(3000, 'after OVR89 recycle');
+              await sleepLog(987, 'after OVR89 recycle');
               // Refresh histogram after OVR89 to decide next step
               let refreshed = null;
               try { refreshed = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after OVR89 within 8s:', e); }
@@ -604,7 +742,7 @@
                   if (!hasX10CriteriaFromHistogram(xHist)) break;
                   const res2 = await doRecycle('X10_84', 'X10_84');
                   console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res2);
-                  await sleepLog(3000, `after X10_84 pass ${pass + 1}`);
+                  await sleepLog(987, `after X10_84 pass ${pass + 1}`);
                   let ref = null;
                   try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
                   xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
@@ -620,7 +758,7 @@
                 if (!hasX10CriteriaFromHistogram(xHist)) break;
                 const res = await doRecycle('X10_84', 'X10_84');
                 console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res);
-                await sleepLog(3000, `after X10_84 pass ${pass + 1}`);
+                await sleepLog(987, `after X10_84 pass ${pass + 1}`);
                 let ref = null;
                 try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
                 xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
@@ -650,6 +788,7 @@
         // 3) Click "Send All To Club" first
         let clicked = false;
         try {
+          await scrollUnassignedContainerToTop();
           const res = await withTimeout(chrome.runtime.sendMessage({ type: 'CLICK_SEND_ALL' }), 'CLICK_SEND_ALL', 15000);
           clicked = !!(res && res.ok && res.clicked);
         } catch (e) {
@@ -658,6 +797,7 @@
 
         if (!clicked) {
           // Fallback: try to find and click locally within 10s
+          await scrollUnassignedContainerToTop();
           const sendBtn = await waitForButton([
             'button.btn-standard.autosbc-header-button.section-header-btn.mini.call-to-action',
             'button.btn-standard.call-to-action',
@@ -676,16 +816,17 @@
             await sleep(600);
             continue;
           }
-          await sleepLog(3000, 'post-send-stabilize');
+          await sleepLog(987, 'post-send-stabilize');
           try {
             const hist = lastRatingHistogram || {};
             const mode = decideRecycleModeFromHistogram(hist);
             console.log('[Automation] Post-send decision:', { mode, hist });
 
             if (mode === 'OVR89') {
+              await scrollUnassignedContainerToTop();
               const res1 = await doRecycle('OVR89');
               console.log('[Automation] RECYCLE_WORKFLOW OVR89 result:', res1);
-              await sleepLog(3000, 'after OVR89 recycle');
+              await sleepLog(987, 'after OVR89 recycle');
               // Refresh histogram after OVR89 to decide next step
               let refreshed = null;
               try { refreshed = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after OVR89 within 8s:', e); }
@@ -695,9 +836,10 @@
                 let xHist = hist2;
                 for (let pass = 0; pass < 3; pass++) {
                   if (!hasX10CriteriaFromHistogram(xHist)) break;
+                  await scrollUnassignedContainerToTop();
                   const res2 = await doRecycle('X10_84', 'X10_84');
                   console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res2);
-                  await sleepLog(3000, `after X10_84 pass ${pass + 1}`);
+                  await sleepLog(987, `after X10_84 pass ${pass + 1}`);
                   let ref = null;
                   try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
                   xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
@@ -711,9 +853,10 @@
               let xHist = lastRatingHistogram || {};
               for (let pass = 0; pass < 3; pass++) {
                 if (!hasX10CriteriaFromHistogram(xHist)) break;
+                await scrollUnassignedContainerToTop();
                 const res = await doRecycle('X10_84', 'X10_84');
                 console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res);
-                await sleepLog(3000, `after X10_84 pass ${pass + 1}`);
+                await sleepLog(987, `after X10_84 pass ${pass + 1}`);
                 let ref = null;
                 try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
                 xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
@@ -756,9 +899,10 @@
             console.log('[Automation] No Send All; all duplicates. Deciding directly:', { mode, hist });
             try {
               if (mode === 'OVR89') {
+                await scrollUnassignedContainerToTop();
                 const res1 = await doRecycle('OVR89');
                 console.log('[Automation] RECYCLE_WORKFLOW OVR89 result:', res1);
-                await sleepLog(3000, 'after OVR89 recycle');
+                await sleepLog(987, 'after OVR89 recycle');
                 // Refresh histogram after OVR89 to decide next step
                 let refreshed = null;
                 try { refreshed = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after OVR89 within 8s:', e); }
@@ -768,9 +912,10 @@
                   let xHist = hist2;
                   for (let pass = 0; pass < 3; pass++) {
                     if (!hasX10CriteriaFromHistogram(xHist)) break;
+                    await scrollUnassignedContainerToTop();
                     const res2 = await doRecycle('X10_84', 'X10_84');
                     console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res2);
-                    await sleepLog(3000, `after X10_84 pass ${pass + 1}`);
+                    await sleepLog(987, `after X10_84 pass ${pass + 1}`);
                     let ref = null;
                     try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
                     xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
@@ -784,9 +929,10 @@
                 let xHist = lastRatingHistogram || {};
                 for (let pass = 0; pass < 3; pass++) {
                   if (!hasX10CriteriaFromHistogram(xHist)) break;
+                  await scrollUnassignedContainerToTop();
                   const res = await doRecycle('X10_84', 'X10_84');
                   console.log(`[Automation] RECYCLE_WORKFLOW X10_84 pass ${pass + 1} result:`, res);
-                  await sleepLog(3000, `after X10_84 pass ${pass + 1}`);
+                  await sleepLog(987, `after X10_84 pass ${pass + 1}`);
                   let ref = null;
                   try { ref = await oncePurchasedItems(8000); } catch (e) { console.warn('[Automation] No purchased/items after X10_84 within 8s:', e); }
                   xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
