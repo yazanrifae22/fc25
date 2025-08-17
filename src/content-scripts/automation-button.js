@@ -281,14 +281,14 @@
   }
 
   async function doRecycle(mode, passLabel) {
-    return callBg('RECYCLE_WORKFLOW', { mode }, { label: `RECYCLE_WORKFLOW ${passLabel || mode}`, timeoutMs: 60000, retries: 2 });
+    return callBg('RECYCLE_WORKFLOW', { mode }, { label: `RECYCLE_WORKFLOW ${passLabel || mode}`, timeoutMs: 15000, retries: 1, waitBetweenMs: 500 });
   }
 
-  async function doQuickSell(passes = 3) {
+  async function doQuickSell(passes = 1) {
     let last = null;
     for (let i = 0; i < passes; i++) {
-      last = await callBg('QUICK_SELL_UNTRADEABLES', {}, { label: `QUICK_SELL_UNTRADEABLES pass ${i + 1}`, timeoutMs: 60000, retries: 2 });
-      await sleepLog(987, `after QUICK_SELL pass ${i + 1}`);
+      last = await callBg('QUICK_SELL_UNTRADEABLES', {}, { label: `QUICK_SELL_UNTRADEABLES pass ${i + 1}`, timeoutMs: 15000, retries: 1, waitBetweenMs: 500 });
+      await sleepLog(350, `after QUICK_SELL pass ${i + 1}`);
     }
     return last;
   }
@@ -605,6 +605,34 @@
     return true;
   }
 
+  // Attempt to open the next pack quickly after finishing actions.
+  // Tries background click first, then a short local fallback.
+  async function tryOpenNextPackAtEnd(maxLocalWaitMs = 3000) {
+    try {
+      const res = await withTimeout(chrome.runtime.sendMessage({ type: 'CLICK_OPEN' }), 'CLICK_OPEN (post-actions)', 5000);
+      if (res && res.ok && res.clicked) {
+        console.log('[Automation] CLICK_OPEN succeeded immediately after actions');
+        return true;
+      }
+    } catch (e) {
+      try { console.warn('[Automation] Background CLICK_OPEN (post-actions) error:', e); } catch {}
+    }
+    // Short local fallback
+    const openBtn = await waitForButton([
+      'button.currency.call-to-action',
+      'button.call-to-action',
+      'button'
+    ], 'Open', Math.max(0, Math.min(3000, maxLocalWaitMs)));
+    if (openBtn) {
+      const clicked = await clickElement(openBtn);
+      if (clicked) {
+        console.log('[Automation] Local Open clicked immediately after actions');
+        return true;
+      }
+    }
+    return false;
+  }
+
   async function runAutomation(runsParam) {
     if (isRunning) return;
     isRunning = true;
@@ -618,6 +646,7 @@
       const runs = Math.max(1, parseInt(String(runsParam ?? 5), 10) || 5);
       let opened = 0;
       resetOpenCounter(runs);
+      let preOpened = false; // if true, a next pack was opened at the end of the previous loop
 
       while (opened < runs) {
         console.log(`[Automation] ==== Run ${opened + 1}/${runs} start ====`);
@@ -627,48 +656,53 @@
         const deadlineExceeded = () => (Date.now() - iterStart) > iterTimeoutMs;
         // Prepare listener BEFORE clicking to avoid race with fast network
         const purchasedWait = oncePurchasedItems(12000);
-        // 1) Click the Open button (prefer background MAIN-world click)
+        // 1) Click the Open button (prefer background MAIN-world click), or consume a pre-opened click
         let openClicked = false;
         let didOpen = false;
-        try {
-          const res = await withTimeout(chrome.runtime.sendMessage({ type: 'CLICK_OPEN' }), 'CLICK_OPEN', 20000);
-          openClicked = !!(res && res.ok && res.clicked);
-          didOpen = didOpen || openClicked;
-        } catch (e) {
-          console.warn('[Automation] Background CLICK_OPEN error:', e);
-        }
-        if (!openClicked) {
-          // Fallback: try locally
-          const openBtn = await waitForButton([
-            'button.currency.call-to-action',
-            'button.call-to-action',
-            'button'
-          ], 'Open', 8000);
-          if (!openBtn) {
-            console.warn('[Automation] Open button not found. Attempting recovery before stopping...');
-            const recovered = await attemptRecoveryBeforeStop();
-            if (recovered) {
-              // Give the UI a moment and try next iteration instead of stopping
-              await sleep(400);
-              continue;
-            }
-            // Final guard: ensure there is truly no quick sell or recycle available
-            const quickCheckSend = await waitForButton([
-              'button.btn-standard.autosbc-header-button.section-header-btn.mini.call-to-action',
-              'button.btn-standard.call-to-action',
-              'button'
-            ], 'Send All To Club', 1200);
-            const recycleVisible = !!(document.querySelector('#auto-sbc-recycle') && isVisibleClickable(document.querySelector('#auto-sbc-recycle')));
-            if (quickCheckSend || recycleVisible) {
-              console.warn('[Automation] Recovery hint found (send-all or recycle). Continuing loop.');
-              await sleep(400);
-              continue;
-            }
-            console.warn('[Automation] Open button not found and no recovery actions available. Stopping.');
-            break;
+        if (preOpened) {
+          didOpen = true;
+          preOpened = false;
+        } else {
+          try {
+            const res = await withTimeout(chrome.runtime.sendMessage({ type: 'CLICK_OPEN' }), 'CLICK_OPEN', 20000);
+            openClicked = !!(res && res.ok && res.clicked);
+            didOpen = didOpen || openClicked;
+          } catch (e) {
+            console.warn('[Automation] Background CLICK_OPEN error:', e);
           }
-          const localClicked = await clickElement(openBtn);
-          if (localClicked) didOpen = true;
+          if (!openClicked) {
+            // Fallback: try locally (shorter wait to avoid long stalls)
+            const openBtn = await waitForButton([
+              'button.currency.call-to-action',
+              'button.call-to-action',
+              'button'
+            ], 'Open', 4000);
+            if (!openBtn) {
+              console.warn('[Automation] Open button not found. Attempting recovery before stopping...');
+              const recovered = await attemptRecoveryBeforeStop();
+              if (recovered) {
+                // Give the UI a moment and try next iteration instead of stopping
+                await sleep(300);
+                continue;
+              }
+              // Final guard: ensure there is truly no quick sell or recycle available
+              const quickCheckSend = await waitForButton([
+                'button.btn-standard.autosbc-header-button.section-header-btn.mini.call-to-action',
+                'button.btn-standard.call-to-action',
+                'button'
+              ], 'Send All To Club', 1200);
+              const recycleVisible = !!(document.querySelector('#auto-sbc-recycle') && isVisibleClickable(document.querySelector('#auto-sbc-recycle')));
+              if (quickCheckSend || recycleVisible) {
+                console.warn('[Automation] Recovery hint found (send-all or recycle). Continuing loop.');
+                await sleep(300);
+                continue;
+              }
+              console.warn('[Automation] Open button not found and no recovery actions available. Stopping.');
+              break;
+            }
+            const localClicked = await clickElement(openBtn);
+            if (localClicked) didOpen = true;
+          }
         }
         if (didOpen) {
           opened++;
@@ -676,7 +710,11 @@
         }
         if (deadlineExceeded()) {
           console.warn('[Automation] Iteration watchdog: deadline exceeded after clicking Open');
-          await sleep(600);
+          {
+            const openedNext = await tryOpenNextPackAtEnd(2500);
+            if (openedNext) preOpened = true;
+            await sleep(openedNext ? 350 : 300);
+          }
           continue;
         }
 
@@ -688,7 +726,7 @@
         if (diverted) {
           console.log('[Automation] Unassigned dialog handled; jumping to Quick Sell flow');
           try {
-            const q = await doQuickSell(3);
+            const q = await doQuickSell();
             console.log('[Automation] QUICK_SELL_UNTRADEABLES result (after Unassigned):', q);
           } catch (e) {
             console.warn('[Automation] QUICK_SELL_UNTRADEABLES error (after Unassigned):', e);
@@ -701,7 +739,11 @@
               console.log('[Automation] No players/items remain after Unassigned quick sell; continuing to next open.');
             }
           } catch {}
-          await sleep(600);
+          {
+            const openedNext = await tryOpenNextPackAtEnd(2500);
+            if (openedNext) preOpened = true;
+            await sleep(openedNext ? 350 : 300);
+          }
           continue;
         }
 
@@ -749,7 +791,7 @@
                   console.log('[Automation] Histogram after X10_84 pass:', xHist);
                 }
               }
-              const q = await doQuickSell(3);
+              const q = await doQuickSell();
               console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
             } else if (mode === 'X10_84') {
               // Recycle X10_84 repeatedly while criteria hold
@@ -764,10 +806,10 @@
                 xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
                 console.log('[Automation] Histogram after X10_84 pass:', xHist);
               }
-              const q = await doQuickSell(3);
+              const q = await doQuickSell();
               console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
             } else {
-              const q = await doQuickSell(3);
+              const q = await doQuickSell();
               console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
             }
           } catch (e) {
@@ -781,7 +823,11 @@
               console.log('[Automation] No players/items remain after actions; continuing to next open.');
             }
           } catch {}
-          await sleep(600);
+          {
+            const openedNext = await tryOpenNextPackAtEnd(2500);
+            if (openedNext) preOpened = true;
+            await sleep(openedNext ? 350 : 300);
+          }
           continue;
         }
 
@@ -846,7 +892,7 @@
                   console.log('[Automation] Histogram after X10_84 pass:', xHist);
                 }
               }
-              const q = await doQuickSell(3);
+              const q = await doQuickSell();
               console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
             } else if (mode === 'X10_84') {
               // Recycle X10_84 repeatedly while criteria hold
@@ -862,10 +908,10 @@
                 xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
                 console.log('[Automation] Histogram after X10_84 pass:', xHist);
               }
-              const q = await doQuickSell(3);
+              const q = await doQuickSell();
               console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
             } else {
-              const q = await doQuickSell(3);
+              const q = await doQuickSell();
               console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
             }
           } catch (e) {
@@ -879,7 +925,11 @@
               console.log('[Automation] No players/items remain after actions; continuing to next open.');
             }
           } catch {}
-          await sleep(600);
+          {
+            const openedNext = await tryOpenNextPackAtEnd(2500);
+            if (openedNext) preOpened = true;
+            await sleep(openedNext ? 350 : 300);
+          }
           continue;
         }
 
@@ -922,7 +972,7 @@
                     console.log('[Automation] Histogram after X10_84 pass:', xHist);
                   }
                 }
-                const q = await doQuickSell(3);
+                const q = await doQuickSell();
                 console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
               } else if (mode === 'X10_84') {
                 // Recycle X10_84 repeatedly while criteria hold
@@ -938,10 +988,10 @@
                   xHist = (ref && computeRatingHistogram(ref.data)) || lastRatingHistogram || xHist;
                   console.log('[Automation] Histogram after X10_84 pass:', xHist);
                 }
-                const q = await doQuickSell(3);
+                const q = await doQuickSell();
                 console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
               } else {
-                const q = await doQuickSell(3);
+                const q = await doQuickSell();
                 console.log('[Automation] QUICK_SELL_UNTRADEABLES result:', q);
               }
             } catch (e) {
@@ -955,7 +1005,11 @@
                 console.log('[Automation] No players/items remain after actions; continuing to next open.');
               }
             } catch {}
-            await sleep(600);
+            {
+              const openedNext = await tryOpenNextPackAtEnd(2500);
+              if (openedNext) preOpened = true;
+              await sleep(openedNext ? 350 : 300);
+            }
             continue;
           }
         }
