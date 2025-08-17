@@ -105,7 +105,7 @@ All messages use request/response with `{ ok: boolean, error?: string, ... }`.
   - Container: `#auto-sbc-container.auto-sbc-container, #auto-sbc-container`
   - Mode buttons (inner `textContent` match):
     - OVR89: includes `"89 ovr squadshifter"` or `"89 ovr squad shifter"`, or any label/aria that contains `89` and either `ovr` or `squad`
-    - X10_84: includes `"84+ x10 upgrade"` or `"84 + x10 upgrade"` or `"84x10 upgrade"`
+    - X10_84: includes `"84+ x10 upgrade"` or `"84 + totw upgrade"` or `"84x10 upgrade"`
     - TOTW variant: includes `"84+ totw upgrade"` or `"84 + totw upgrade"` or `"totw upgrade"`
   - Submit: `#auto-sbc-recycle-submit` or any dialog button matching `submit|confirm|proceed|continue|ok` (case-insensitive)
   - Follow-up Cancel matching: `cancel|close|back|no thanks`

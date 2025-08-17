@@ -335,6 +335,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }
             }
             await scrollToTop();
+            // Safety gate: if "Send All To Club" exists, DO NOT attempt any Quick Sell
+            const getLabel = (el) => {
+              try {
+                const aria = (el.getAttribute && el.getAttribute('aria-label')) || '';
+                const text = (el.textContent || '').trim();
+                return `${aria} ${text}`.toLowerCase();
+              } catch { return ''; }
+            };
+            const hasSendAllToClub = async (ms = 1200) => {
+              const selectors = [
+                'button.btn-standard.autosbc-header-button.section-header-btn.mini.call-to-action',
+                'button.btn-standard.call-to-action',
+                'button.section-header-btn',
+                'button.call-to-action',
+                'button'
+              ];
+              const needle = 'send all to club';
+              const start = Date.now();
+              while (Date.now() - start < ms) {
+                for (const sel of selectors) {
+                  const els = Array.from(document.querySelectorAll(sel));
+                  const found = els.find((el) => isVisible(el) && isEnabled(el) && getLabel(el).includes(needle));
+                  if (found) return true;
+                }
+                await sleep(120);
+              }
+              return false;
+            };
+            if (await hasSendAllToClub()) {
+              try { console.warn('[Automation][QS] Aborting Quick Sell: "Send All To Club" is present'); } catch {}
+              return finish({ takeMeThereClicked, ellipsisClicked: false, quickSellClicked: false, confirmClicked: false, dismissed: false, reason: 'send-all-present' });
+            }
+
             // Force ellipsis path: click the 3-dots then choose "Quick Sell untradeable items for 0" from popup
             let ellipsisClicked = false;
             let quickSellClicked = false;
@@ -355,6 +388,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               await sleepLog(1200, 'after-ellipsis'); // allow menu render (stabilization)
             } else {
               try { console.warn('[Automation][QS] Ellipsis button not found'); } catch {}
+              // Do NOT attempt any quick sell without ellipsis; enforce strict sequence
+              return finish({ takeMeThereClicked, ellipsisClicked: false, quickSellClicked: false, confirmClicked: false, dismissed: false, reason: 'ellipsis-not-found' });
             }
 
             // 2) From popup, click: "Quick Sell untradeable items for 0"
@@ -375,6 +410,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             // Prefer a scoped search inside the bulk action popup
             let qsBtn = null;
             let popup = await waitForBulkPopup(6000);
+            if (!popup) {
+              try { console.warn('[Automation][QS] Bulk action popup not found after ellipsis'); } catch {}
+              // Do NOT search globally; require popup to be present
+              return finish({ takeMeThereClicked, ellipsisClicked, quickSellClicked: false, confirmClicked: false, dismissed: false, reason: 'popup-not-found' });
+            }
             if (popup) {
               // Helper to search within popup including nested shadow roots
               const deepWithin = (root, sel) => {
@@ -397,12 +437,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               for (const b of btns) {
                 const txt = textOf(b);
                 const aria = (b.getAttribute && (b.getAttribute('aria-label') || '') || '').toLowerCase();
-                if (matchPopupQuickSell(txt, b, aria) && isVisible(b) && isEnabled(b)) { qsBtn = b; break; }
+                if (!isInlineKeyQuickSell(b) && matchPopupQuickSell(txt, b, aria) && isVisible(b) && isEnabled(b)) { qsBtn = b; break; }
                 const sp = b.querySelector('span.btn-text, span');
                 if (sp) {
                   const st = textOf(sp);
                   const sa = (sp.getAttribute && (sp.getAttribute('aria-label') || '') || '').toLowerCase();
-                  if (matchPopupQuickSell(st, sp, sa)) { qsBtn = b; break; }
+                  if (!isInlineKeyQuickSell(sp) && matchPopupQuickSell(st, sp, sa)) { qsBtn = b; break; }
                 }
               }
               // As a broader fallback inside popup, scan all elements for a matching label and bubble to clickable
@@ -429,69 +469,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               if (!qsBtn) {
                 for (const b of btns) {
                   const label = `${textOf(b)} ${(b.getAttribute && (b.getAttribute('aria-label') || '') || '').toLowerCase()}`;
-                  if (/quick\s*sell/.test(label) && isVisible(b) && isEnabled(b)) { qsBtn = b; break; }
+                  if (!isInlineKeyQuickSell(b) && /quick\s*sell/.test(label) && isVisible(b) && isEnabled(b)) { qsBtn = b; break; }
                   const sp = b.querySelector('span.btn-text, span');
                   if (sp) {
                     const spLabel = `${textOf(sp)} ${(sp.getAttribute && (sp.getAttribute('aria-label') || '') || '').toLowerCase()}`;
-                    if (/quick\s*sell/.test(spLabel)) { qsBtn = b; break; }
+                    if (!isInlineKeyQuickSell(sp) && /quick\s*sell/.test(spLabel)) { qsBtn = b; break; }
                   }
                 }
               }
             }
-            // Global fallback if not found in popup
+            // Strict: if not found within popup, do not attempt global search
             if (!qsBtn) {
-              const t1 = Date.now();
-              while (!qsBtn && Date.now() - t1 < 8000) {
-                qsBtn = findByText((txt, node, aria) => {
-                  if (isInlineKeyQuickSell(node)) return false; // avoid inline quick sell button
-                  return matchPopupQuickSell(txt, node, aria);
-                });
-                if (qsBtn && (!isVisible(qsBtn) || !isEnabled(qsBtn))) qsBtn = null;
-                if (!qsBtn) await sleep(250);
-              }
-              // If still not found, log available menu options for diagnostics (broad)
-              try {
-                const menus = Array.from(document.querySelectorAll('.ut-bulk-action-popup-view, .ut-bulk-action, .ut-bulk-actions, [role="menu"], .context-menu, .menu, ul[role="menu"]'));
-                const labels = [];
-                for (const m of menus) {
-                  const items = Array.from(m.querySelectorAll('button, [role="button"], [role="menuitem"], li, a, div'));
-                  for (const it of items) {
-                    if (!isVisible(it)) continue;
-                    const t = (it.textContent || '').trim().replace(/\s+/g,' ');
-                    const a = (it.getAttribute && it.getAttribute('aria-label')) || '';
-                    const line = t || a || '[no-text]';
-                    if (line) labels.push(line);
-                  }
-                }
-                if (labels.length) console.warn('[Automation][QS] Menu options seen (broad):', labels);
-              } catch {}
-              if (!qsBtn && ellipsisClicked && ell) {
-                // Retry once by re-opening the ellipsis menu and re-checking the popup
-                await clickEl(ell);
-                await sleepLog(500, 'retry-ellipsis-menu');
-                popup = await waitForBulkPopup(4000);
-                if (popup && !qsBtn) {
-                  const btns = Array.from(popup.querySelectorAll('button, [role="button"], [role="menuitem"]'));
-                  for (const b of btns) {
-                    const txt = textOf(b);
-                    const aria = (b.getAttribute && (b.getAttribute('aria-label') || '') || '').toLowerCase();
-                    if (matchPopupQuickSell(txt, b, aria) && isVisible(b) && isEnabled(b)) { qsBtn = b; break; }
-                    const sp = b.querySelector('span.btn-text, span');
-                    if (sp) {
-                      const st = textOf(sp);
-                      const sa = (sp.getAttribute && (sp.getAttribute('aria-label') || '') || '').toLowerCase();
-                      if (matchPopupQuickSell(st, sp, sa)) { qsBtn = b; break; }
-                    }
-                  }
-                }
-                // Final broad fallback: any visible menuitem containing "quick sell"
-                if (!qsBtn) {
-                  const anyQuick = findByText((txt, node, aria) => /quick\s*sell/i.test(`${txt} ${aria}`));
-                  if (anyQuick && isVisible(anyQuick) && isEnabled(anyQuick)) qsBtn = anyQuick;
-                }
-              }
+              try { console.warn('[Automation][QS] Popup Quick Sell option not found inside menu'); } catch {}
+              return finish({ takeMeThereClicked, ellipsisClicked, quickSellClicked: false, confirmClicked: false, dismissed: false, reason: 'popup-quick-sell-not-found' });
             }
-            if (!qsBtn) { try { console.warn('[Automation][QS] Popup Quick Sell option not found'); } catch {} }
             if (qsBtn) {
               quickSellClicked = await clickEl(qsBtn.closest('button') || qsBtn);
               try { console.log('[Automation][QS] Popup Quick Sell clicked:', quickSellClicked); } catch {}
@@ -1185,7 +1176,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const t = textOf(b);
                 if (mode === 'OVR89' && t.includes('89 ovr squadshifter')) { targetBtn = b; break; }
                 if (mode === 'X10_84') {
-                  const isX10 = t.includes('84+ x10 upgrade') || t.includes('84 + x10 upgrade') || t.includes('84x10 upgrade');
+                  const isX10 = t.includes('84+ totw upgrade') || t.includes('84 + totw upgrade') || t.includes('totw upgrade');
                   const isTotw = t.includes('84+ totw upgrade') || t.includes('84 + totw upgrade') || t.includes('totw upgrade');
                   if (isX10 && !candX10) candX10 = b;
                   if (isTotw && !candTotw) candTotw = b;
