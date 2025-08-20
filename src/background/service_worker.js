@@ -1176,7 +1176,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const t = textOf(b);
                 if (mode === 'OVR89' && t.includes('89 ovr squadshifter')) { targetBtn = b; break; }
                 if (mode === 'X10_84') {
-                  const isX10 = t.includes('84+ x10') || t.includes('84 + x10') || t.includes('84x10') || t.includes('x10');
+                  const isX10 = t.includes('84 + x10') || t.includes('84 + x10') || t.includes('84x10') || t.includes('x10');
                   const isTotw = t.includes('84+ totw') || t.includes('84 + totw') || t.includes('totw');
                   if (isX10 && !candX10) candX10 = b;
                   if (isTotw && !candTotw) candTotw = b;
